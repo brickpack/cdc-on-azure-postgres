@@ -1,0 +1,43 @@
+{
+  "_meta": {
+    "file_purpose": "Postgres -> MySQL type-conversion fixes for the rollback JDBC sink. Stripped out by deploy-rollback-sink.sh before merging (Kafka Connect would otherwise log warnings about this unknown '_meta' key). Only the 'unwrap' and 'routeTopic' transforms below are active by default in the 'transforms' list -- they are schema-agnostic and safe for any table. Everything else is an inactive TEMPLATE: the transforms.<name>.* keys are present in this file but not referenced by the 'transforms' list, so Kafka Connect ignores them until you copy them into mysql-sink-standby.json (or edit this file before running deploy-rollback-sink.sh), replace the placeholder field names with your real column names, and add the transform name to the 'transforms' CSV.",
+
+    "unwrap": "Flattens the Debezium change envelope (before/after/source/op/ts_ms) down to the plain row image. Without this, the JDBC sink would try to write the whole envelope struct as literal columns instead of your table's actual data. delete.handling.mode=drop + drop.tombstones=true is the standard pairing with the sink's delete.enabled=true: a Postgres DELETE becomes one record with a null value (which the sink turns into a SQL DELETE), and the raw Kafka tombstone Debezium also emits is discarded since the sink doesn't need it.",
+
+    "routeTopic": "Debezium topics are named '<topic.prefix>.<schema>.<table>' (e.g. cdc.public.orders), but mysql-sink-standby.json's table.name.format defaults to '${topic}'. Without rewriting the topic to just the table name, the sink would try to write to a MySQL table literally named 'cdc.public.orders'. The regex assumes topic.prefix=cdc, matching postgres-source.json -- change the regex if you change topic.prefix.",
+
+    "boolToTinyInt": "TEMPLATE (inactive), stock SMT, no custom code needed. Postgres boolean already arrives as a native Kafka Connect BOOLEAN, and the MySQL JDBC driver binds that correctly to TINYINT(1) as 1/0 with no transform required in the normal case. Only activate this if you have evidence (see README 'Type transform validation') that booleans are landing as the literal strings 'true'/'false' -- which MySQL would silently store as 0 for BOTH values, corrupting the data with no error. Replace BOOLEAN_FIELD_NAME_1/2 with your real column names, add more comma-separated 'field:int8' pairs to 'spec' for additional columns, then add 'boolToTinyInt' to the transforms list.",
+
+    "tsTzToDatetime": "TEMPLATE (inactive), requires a custom SMT class -- NOT included in this repo. Postgres 'timestamp with time zone' is emitted by Debezium as an ISO-8601 string already normalized to UTC with variable fractional-second precision (e.g. '2024-01-01T00:00:00.123456Z'). Kafka Connect's stock TimestampConverter SMT uses a single legacy SimpleDateFormat pattern for both parsing and formatting, which cannot reliably parse that variable-precision ISO-8601 format and reformat it as a bare 'yyyy-MM-dd HH:mm:ss' MySQL DATETIME string in one step. The reliable fix is a small custom SMT (java.time.OffsetDateTime.parse handles the variable precision natively). TIMEZONE ASSUMPTION: write that custom SMT to convert the UTC instant Debezium provides into the 'target.zone' below -- this placeholder defaults target.zone to UTC, meaning rows land in MySQL DATETIME columns as UTC wall-clock time. If your application instead expects original local/session time, change 'target.zone' to that IANA zone ID (e.g. 'America/New_York') -- this property is the one and only place the timezone assumption is made. Duplicate this block (new transform name per column) for each timestamptz column, replacing TIMESTAMPTZ_FIELD_NAME, then add each name to the transforms list.",
+
+    "decimalPrecision": "NOT an SMT -- enforced via connector config instead, see postgres-source.json (decimal.handling.mode=precise) and mysql-sink-standby.json (numeric.mapping=none). 'precise' carries NUMERIC/DECIMAL columns through Kafka as an exact arbitrary-precision Connect Decimal logical type, never a lossy double. 'numeric.mapping=none' (the JDBC sink default) writes that exact value straight into the MySQL DECIMAL column. Do not change either setting to 'double' / 'best_fit' -- that silently rounds to a 64-bit float and rollback data will not match the original Postgres values.",
+
+    "jsonbToJson": "NOT an SMT -- no transform needed. Debezium already serializes Postgres jsonb columns to a plain JSON-text STRING (io.debezium.data.Json) before the record reaches Kafka, so the sink writes a ready-to-use JSON string straight into a MySQL JSON or TEXT column. Just make sure the destination column type is JSON or TEXT, not a short VARCHAR or numeric type.",
+
+    "textVarcharTruncation": "WARNING, not auto-fixed -- there is no stock Kafka Connect SMT that validates or truncates string length safely. Postgres TEXT has no length limit; the original MySQL column it replaced almost certainly does (e.g. VARCHAR(255)), and on rollback replay MySQL will truncate or reject oversized values depending on sql_mode, often without a loud error. Before triggering rollback, run the length-check queries in README 'Type transform validation' for every text/varchar column. If a mismatch is found, the supported fix is widening the destination MySQL column (ALTER TABLE ... MODIFY <col> TEXT) BEFORE running deploy-rollback-sink.sh, not a runtime transform.",
+
+    "enumWorkaround": "TEMPLATE (inactive), requires a custom SMT class -- NOT included in this repo. pg_chameleon needed manual mapping for MySQL ENUM/SET because Postgres enum labels and MySQL enum labels are not guaranteed to match 1:1 (case differences, renamed/reordered labels, etc). If your labels are identical strings on both sides, no mapping is needed: the value already arrives as a plain string and MySQL's ENUM column accepts it directly. If they differ, you need a value remap, and there is no stock Kafka Connect SMT for arbitrary value remapping. The placeholder below shows exactly where it plugs into the chain: implement a small custom SMT (e.g. a class implementing org.apache.kafka.connect.transforms.Transform) that looks up each incoming value in 'mapping' and substitutes the MySQL label, build it into a jar, drop the jar under /usr/share/confluent-hub-components in the Dockerfile so CONNECT_PLUGIN_PATH picks it up, then point 'type' at its fully-qualified class name. Duplicate this block per enum/set column that needs remapping, replacing ENUM_FIELD_NAME, then add each name to the transforms list."
+  },
+
+  "transforms": "unwrap,routeTopic",
+
+  "transforms.unwrap.type": "io.debezium.transforms.ExtractNewRecordState",
+  "transforms.unwrap.drop.tombstones": "true",
+  "transforms.unwrap.delete.handling.mode": "drop",
+
+  "transforms.routeTopic.type": "org.apache.kafka.connect.transforms.RegexRouter",
+  "transforms.routeTopic.regex": "^cdc\\.[^.]+\\.(.+)$",
+  "transforms.routeTopic.replacement": "$1",
+
+  "transforms.boolToTinyInt.type": "org.apache.kafka.connect.transforms.Cast$Value",
+  "transforms.boolToTinyInt.spec": "BOOLEAN_FIELD_NAME_1:int8,BOOLEAN_FIELD_NAME_2:int8",
+
+  "transforms.tsTzToDatetime_TIMESTAMPTZ_FIELD_NAME.type": "com.example.cdc.transforms.ZonedTimestampToDatetime",
+  "transforms.tsTzToDatetime_TIMESTAMPTZ_FIELD_NAME.field": "TIMESTAMPTZ_FIELD_NAME",
+  "transforms.tsTzToDatetime_TIMESTAMPTZ_FIELD_NAME.target.zone": "UTC",
+  "transforms.tsTzToDatetime_TIMESTAMPTZ_FIELD_NAME.target.format": "yyyy-MM-dd HH:mm:ss",
+
+  "transforms.enumWorkaround_ENUM_FIELD_NAME.type": "com.example.cdc.transforms.EnumValueMapper",
+  "transforms.enumWorkaround_ENUM_FIELD_NAME.field": "ENUM_FIELD_NAME",
+  "transforms.enumWorkaround_ENUM_FIELD_NAME.mapping": "PG_VALUE_1:MYSQL_VALUE_1,PG_VALUE_2:MYSQL_VALUE_2"
+}
