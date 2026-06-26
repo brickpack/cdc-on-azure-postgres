@@ -1,0 +1,91 @@
+services:
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.5.0
+    container_name: cdc-zookeeper
+    restart: unless-stopped
+    environment:
+      ZOOKEEPER_CLIENT_PORT: "2181"
+      ZOOKEEPER_TICK_TIME: "2000"
+    volumes:
+      - ${KAFKA_DATA_DIR:-/kafka-data}/zookeeper/data:/var/lib/zookeeper/data
+      - ${KAFKA_DATA_DIR:-/kafka-data}/zookeeper/log:/var/lib/zookeeper/log
+    networks:
+      - cdc-net
+    healthcheck:
+      test: ["CMD-SHELL", "exec 3<>/dev/tcp/127.0.0.1/2181 && printf 'ruok' >&3 && head -c 4 <&3 | grep -q imok"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
+  kafka:
+    image: confluentinc/cp-kafka:7.5.0
+    container_name: cdc-kafka
+    restart: unless-stopped
+    depends_on:
+      zookeeper:
+        condition: service_healthy
+    environment:
+      KAFKA_BROKER_ID: "1"
+      KAFKA_ZOOKEEPER_CONNECT: "zookeeper:2181"
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: "PLAINTEXT:PLAINTEXT"
+      KAFKA_ADVERTISED_LISTENERS: "PLAINTEXT://kafka:9092"
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: "1"
+      # 168 hours = 7 days. This is the rollback window: any Postgres change
+      # older than this has been deleted from the log and can no longer be
+      # replayed into MySQL. See README "When NOT to rollback".
+      KAFKA_LOG_RETENTION_HOURS: "168"
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+    ports:
+      - "9092:9092"
+    volumes:
+      - ${KAFKA_DATA_DIR:-/kafka-data}/kafka:/var/lib/kafka/data
+    networks:
+      - cdc-net
+    healthcheck:
+      test: ["CMD-SHELL", "kafka-broker-api-versions --bootstrap-server localhost:9092 > /dev/null 2>&1"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
+
+  kafka-connect:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: cdc-kafka-connect
+    restart: unless-stopped
+    depends_on:
+      kafka:
+        condition: service_healthy
+    environment:
+      CONNECT_BOOTSTRAP_SERVERS: "kafka:9092"
+      CONNECT_REST_PORT: "8083"
+      CONNECT_GROUP_ID: "cdc-rollback-connect-cluster"
+      CONNECT_CONFIG_STORAGE_TOPIC: "cdc-connect-configs"
+      CONNECT_OFFSET_STORAGE_TOPIC: "cdc-connect-offsets"
+      CONNECT_STATUS_STORAGE_TOPIC: "cdc-connect-status"
+      CONNECT_CONFIG_STORAGE_REPLICATION_FACTOR: "1"
+      CONNECT_OFFSET_STORAGE_REPLICATION_FACTOR: "1"
+      CONNECT_STATUS_STORAGE_REPLICATION_FACTOR: "1"
+      CONNECT_KEY_CONVERTER: "org.apache.kafka.connect.json.JsonConverter"
+      CONNECT_VALUE_CONVERTER: "org.apache.kafka.connect.json.JsonConverter"
+      CONNECT_KEY_CONVERTER_SCHEMAS_ENABLE: "true"
+      CONNECT_VALUE_CONVERTER_SCHEMAS_ENABLE: "true"
+      CONNECT_REST_ADVERTISED_HOST_NAME: "${CONNECT_REST_ADVERTISED_HOST_NAME:-kafka-connect}"
+      CONNECT_PLUGIN_PATH: "/usr/share/java,/usr/share/confluent-hub-components"
+      CONNECT_LOG4J_ROOT_LOGLEVEL: "INFO"
+    ports:
+      - "8083:8083"
+    networks:
+      - cdc-net
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fs http://localhost:8083/connectors > /dev/null"]
+      interval: 10s
+      timeout: 10s
+      retries: 15
+      start_period: 30s
+
+networks:
+  cdc-net:
+    driver: bridge

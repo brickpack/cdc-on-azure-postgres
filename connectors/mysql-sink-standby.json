@@ -1,0 +1,26 @@
+{
+  "_meta": {
+    "WARNING": "This connector is NOT deployed by docker-compose or any startup script. It exists only as a config template. It is deployed ONLY by scripts/deploy-rollback-sink.sh during an actual rollback, which fills in the ORIGINAL_MYSQL_* placeholders below and merges in connectors/type-transforms.json. Do not POST this file to Kafka Connect as-is."
+  },
+  "name": "mysql-rollback-sink-connector",
+  "config": {
+    "connector.class": "io.confluent.connect.jdbc.JdbcSinkConnector",
+    "tasks.max": "1",
+
+    "topics.regex": "cdc\\..*",
+
+    "connection.url": "jdbc:mysql://ORIGINAL_MYSQL_HOST:ORIGINAL_MYSQL_PORT/ORIGINAL_MYSQL_DBNAME?useSSL=true&serverTimezone=UTC",
+    "connection.user": "ORIGINAL_MYSQL_USER",
+    "connection.password": "ORIGINAL_MYSQL_PASSWORD",
+
+    "insert.mode": "upsert",
+    "pk.mode": "record_key",
+    "auto.create": "false",
+    "auto.evolve": "false",
+    "delete.enabled": "true",
+
+    "table.name.format": "${topic}",
+
+    "numeric.mapping": "none"
+  }
+}
