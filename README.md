@@ -51,7 +51,7 @@ application can be flipped back.
 On Azure Database for PostgreSQL Flexible Server:
 
 1. Set `wal_level = logical` in the server's parameter blade (or via `az
-   postgres flexible-server parameter set --name wal_level --value logical`).
+postgres flexible-server parameter set --name wal_level --value logical`).
    **This requires a server restart on Azure Flexible Server** -- plan for
    a brief connection interruption.
 2. Create a dedicated replication user:
@@ -81,9 +81,60 @@ replication path from MySQL to Postgres.
    connection details, table list, slot/publication names, Kafka data
    directory).
 2. Bring up the stack:
+
    ```bash
    docker compose up -d --build
    ```
+
+   **If the VM has no outbound internet access** (cannot reach Docker Hub or
+   Confluent Hub at build time), build and export the images on a machine
+   that does have access, then transfer them:
+
+   On your build machine (use `--platform linux/amd64` if it is Apple Silicon):
+
+   ```bash
+   # Build the Kafka Connect image
+   docker buildx build --platform linux/amd64 \
+     --output type=docker,dest=cdc-kafka-connect.tar .
+   gzip cdc-kafka-connect.tar
+
+   # Materialize the base images as single-arch to avoid Docker Desktop
+   # multi-arch manifest issues with docker save
+   echo "FROM confluentinc/cp-zookeeper:7.5.0" | \
+     docker buildx build --platform linux/amd64 --load \
+     -t confluentinc/cp-zookeeper:7.5.0 -
+   echo "FROM confluentinc/cp-kafka:7.5.0" | \
+     docker buildx build --platform linux/amd64 --load \
+     -t confluentinc/cp-kafka:7.5.0 -
+
+   docker save confluentinc/cp-zookeeper:7.5.0 | gzip > cp-zookeeper.tar.gz
+   docker save confluentinc/cp-kafka:7.5.0 | gzip > cp-kafka.tar.gz
+   ```
+
+   Copy to the VM:
+
+   ```bash
+   scp cdc-kafka-connect.tar.gz cp-zookeeper.tar.gz cp-kafka.tar.gz \
+     docker-compose.yml .env \
+     <user>@<vm-ip>:~/migration/cdc/
+   scp connectors/postgres-source.json <user>@<vm-ip>:~/migration/cdc/connectors/
+   scp scripts/deploy-postgres-source.sh scripts/monitor-debezium.sh \
+     scripts/teardown.sh <user>@<vm-ip>:~/migration/cdc/scripts/
+   ```
+
+   On the VM, load the images and start:
+
+   ```bash
+   docker load < cdc-kafka-connect.tar.gz
+   docker load < cp-zookeeper.tar.gz
+   docker load < cp-kafka.tar.gz
+   docker-compose up -d
+   ```
+
+   Note: locked-down VMs typically have the older `docker-compose` (V1)
+   rather than the `docker compose` V2 plugin. Use `docker-compose` (hyphen)
+   if `docker compose` gives an "unknown shorthand flag" error.
+
 3. Deploy the Postgres source connector and watch the initial snapshot:
    ```bash
    ./scripts/deploy-postgres-source.sh
@@ -134,7 +185,7 @@ summary covering:
 What to watch for:
 
 - **Connector not RUNNING**: investigate immediately via `docker compose
-  logs kafka-connect`. Every minute it's down is a gap in the change log.
+logs kafka-connect`. Every minute it's down is a gap in the change log.
 - **Growing WAL lag**: means Debezium is falling behind or stopped
   consuming. Postgres keeps WAL on disk for the slot until it's consumed,
   so sustained growth can fill the Postgres server's storage, not just this
@@ -151,14 +202,14 @@ make one test write to Postgres per data type below, let it flow to Kafka,
 then (in a non-production test) deploy the sink against a **throwaway**
 MySQL database/table first, not the real original MySQL, and compare.
 
-| Type | Postgres check | MySQL check (after test replay) |
-|---|---|---|
-| timestamptz | `SELECT my_ts_col, my_ts_col AT TIME ZONE 'UTC' FROM my_table WHERE id = 1;` | `SELECT my_ts_col FROM my_table WHERE id = 1;` -- must equal the UTC value, not local server time |
-| boolean | `SELECT my_bool_col FROM my_table WHERE id = 1;` | `SELECT my_bool_col, my_bool_col + 0 FROM my_table WHERE id = 1;` -- must be `1` or `0`, never the string `'true'`/`'false'` |
-| jsonb | `SELECT my_jsonb_col::text FROM my_table WHERE id = 1;` | `SELECT my_json_col FROM my_table WHERE id = 1;` -- must parse as valid JSON and match field-for-field |
-| numeric/decimal | `SELECT my_numeric_col, pg_typeof(my_numeric_col) FROM my_table WHERE id = 1;` | `SELECT my_decimal_col FROM my_table WHERE id = 1;` -- every digit must match, no rounding |
-| text -> varchar | `SELECT MAX(LENGTH(my_text_col)) FROM my_table;` | Compare against the MySQL column's declared length: `SELECT CHARACTER_MAXIMUM_LENGTH FROM information_schema.columns WHERE table_name='my_table' AND column_name='my_col';` -- if Postgres max length > MySQL limit, widen the MySQL column before rollback |
-| enum/set | `SELECT DISTINCT my_enum_col FROM my_table;` | `SHOW COLUMNS FROM my_table LIKE 'my_enum_col';` -- compare the label sets; if they differ, you need the `enumWorkaround` custom SMT (see `connectors/type-transforms.json`) |
+| Type            | Postgres check                                                                 | MySQL check (after test replay)                                                                                                                                                                                                                             |
+| --------------- | ------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| timestamptz     | `SELECT my_ts_col, my_ts_col AT TIME ZONE 'UTC' FROM my_table WHERE id = 1;`   | `SELECT my_ts_col FROM my_table WHERE id = 1;` -- must equal the UTC value, not local server time                                                                                                                                                           |
+| boolean         | `SELECT my_bool_col FROM my_table WHERE id = 1;`                               | `SELECT my_bool_col, my_bool_col + 0 FROM my_table WHERE id = 1;` -- must be `1` or `0`, never the string `'true'`/`'false'`                                                                                                                                |
+| jsonb           | `SELECT my_jsonb_col::text FROM my_table WHERE id = 1;`                        | `SELECT my_json_col FROM my_table WHERE id = 1;` -- must parse as valid JSON and match field-for-field                                                                                                                                                      |
+| numeric/decimal | `SELECT my_numeric_col, pg_typeof(my_numeric_col) FROM my_table WHERE id = 1;` | `SELECT my_decimal_col FROM my_table WHERE id = 1;` -- every digit must match, no rounding                                                                                                                                                                  |
+| text -> varchar | `SELECT MAX(LENGTH(my_text_col)) FROM my_table;`                               | Compare against the MySQL column's declared length: `SELECT CHARACTER_MAXIMUM_LENGTH FROM information_schema.columns WHERE table_name='my_table' AND column_name='my_col';` -- if Postgres max length > MySQL limit, widen the MySQL column before rollback |
+| enum/set        | `SELECT DISTINCT my_enum_col FROM my_table;`                                   | `SHOW COLUMNS FROM my_table LIKE 'my_enum_col';` -- compare the label sets; if they differ, you need the `enumWorkaround` custom SMT (see `connectors/type-transforms.json`)                                                                                |
 
 If any row doesn't match, fix the relevant transform or destination column
 definition and re-test before proceeding with a real rollback.
@@ -223,3 +274,62 @@ changes, not a faithful copy of Postgres. Past 168 hours, this pipeline can
 no longer be used for a safe rollback; you would need a different recovery
 strategy (e.g. a fresh Postgres-to-MySQL migration in reverse, or restoring
 from backups).
+
+## Troubleshooting
+
+**`docker compose` not found on the VM**
+
+The VM likely has Docker but not the Compose V2 plugin. Install it offline
+(download on a machine with internet access, then copy over):
+
+```bash
+# On your build machine
+curl -fsSL -o docker-compose-linux-x86_64 \
+  "https://github.com/docker/compose/releases/download/v2.27.0/docker-compose-linux-x86_64"
+scp docker-compose-linux-x86_64 <user>@<vm-ip>:~/
+
+# On the VM
+mkdir -p ~/.docker/cli-plugins
+mv ~/docker-compose-linux-x86_64 ~/.docker/cli-plugins/docker-compose
+chmod +x ~/.docker/cli-plugins/docker-compose
+docker compose version  # should print v2.27.0
+```
+
+---
+
+**`docker save` fails with "content digest not found" on macOS**
+
+Docker Desktop on Apple Silicon caches multi-arch manifest indices that
+`docker save` can't serialise. Use `buildx --load` to force a clean
+single-arch image into the local daemon before saving:
+
+```bash
+echo "FROM confluentinc/cp-zookeeper:7.5.0" | \
+  docker buildx build --platform linux/amd64 --load \
+  -t confluentinc/cp-zookeeper:7.5.0 -
+docker save confluentinc/cp-zookeeper:7.5.0 | gzip > cp-zookeeper.tar.gz
+```
+
+Repeat for any image that fails.
+
+---
+
+**Image loads without a tag (`Loaded image ID: sha256:...`)**
+
+`docker buildx build --output type=docker` produces an untagged tar.
+Re-tag after loading:
+
+```bash
+docker load < cdc-kafka-connect.tar.gz
+docker tag <sha256-id> cdc-kafka-connect:latest
+```
+
+---
+
+**Zookeeper container never becomes healthy**
+
+Check the logs -- if Zookeeper is actually running and listening on 2181
+but the healthcheck keeps failing, the four-letter-word command used by the
+check (`ruok`) may be blocked. The healthcheck in `docker-compose.yml` uses
+`srvr` instead, which is always whitelisted by default. If you see this
+after a fresh deploy, confirm you have the latest `docker-compose.yml`.

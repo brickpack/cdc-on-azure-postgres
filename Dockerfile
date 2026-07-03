@@ -10,7 +10,8 @@ ARG MYSQL_CONNECTOR_VERSION=8.0.33
 # sink connector (idle rollback target) are installed via confluent-hub so
 # their plugin manifests and transitive deps are managed correctly.
 RUN confluent-hub install --no-prompt debezium/debezium-connector-postgresql:2.4.2 \
- && confluent-hub install --no-prompt confluentinc/kafka-connect-jdbc:10.7.4
+    && confluent-hub install --no-prompt confluentinc/kafka-connect-jdbc:10.7.4 \
+    && rm -rf /tmp/confluent-hub-*
 
 # The Confluent Hub build of kafka-connect-jdbc ships WITHOUT a MySQL JDBC
 # driver (GPL licensing prevents Confluent from bundling it). The JDBC sink

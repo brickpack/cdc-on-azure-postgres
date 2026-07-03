@@ -216,3 +216,11 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Docker Images
+#   Ignore Docker image files and directories.
+*.tar.gz
+
+# macOS
+#   General macOS files to ignore.
+.DS_Store

@@ -15,7 +15,7 @@
 
     "slot.name": "SLOT_NAME",
     "publication.name": "PUBLICATION_NAME",
-    "publication.autocreate.mode": "filtered",
+    "publication.autocreate.mode": "disabled",
     "plugin.name": "pgoutput",
 
     "snapshot.mode": "initial",

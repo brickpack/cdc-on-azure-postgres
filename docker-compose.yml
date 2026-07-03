@@ -12,11 +12,20 @@ services:
     networks:
       - cdc-net
     healthcheck:
-      test: ["CMD-SHELL", "exec 3<>/dev/tcp/127.0.0.1/2181 && printf 'ruok' >&3 && head -c 4 <&3 | grep -q imok"]
+      test:
+        [
+          "CMD-SHELL",
+          "exec 3<>/dev/tcp/127.0.0.1/2181 && printf 'srvr' >&3 && timeout 2 head -c 200 <&3 | grep -q 'Mode:'",
+        ]
       interval: 10s
       timeout: 5s
       retries: 10
       start_period: 20s
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "3"
 
   kafka:
     image: confluentinc/cp-kafka:7.5.0
@@ -43,16 +52,26 @@ services:
     networks:
       - cdc-net
     healthcheck:
-      test: ["CMD-SHELL", "kafka-broker-api-versions --bootstrap-server localhost:9092 > /dev/null 2>&1"]
+      test:
+        [
+          "CMD-SHELL",
+          "kafka-broker-api-versions --bootstrap-server localhost:9092 > /dev/null 2>&1",
+        ]
       interval: 10s
       timeout: 10s
       retries: 10
       start_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "3"
 
   kafka-connect:
     build:
       context: .
       dockerfile: Dockerfile
+    image: cdc-kafka-connect:latest
     container_name: cdc-kafka-connect
     restart: unless-stopped
     depends_on:
@@ -80,11 +99,17 @@ services:
     networks:
       - cdc-net
     healthcheck:
-      test: ["CMD-SHELL", "curl -fs http://localhost:8083/connectors > /dev/null"]
+      test:
+        ["CMD-SHELL", "curl -fs http://localhost:8083/connectors > /dev/null"]
       interval: 10s
       timeout: 10s
       retries: 15
       start_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "3"
 
 networks:
   cdc-net:
