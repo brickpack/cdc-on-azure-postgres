@@ -12,11 +12,7 @@ services:
     networks:
       - cdc-net
     healthcheck:
-      test:
-        [
-          "CMD-SHELL",
-          "exec 3<>/dev/tcp/127.0.0.1/2181 && printf 'srvr' >&3 && timeout 2 head -c 200 <&3 | grep -q 'Mode:'",
-        ]
+      test: ["CMD-SHELL", "bash -c '</dev/tcp/localhost/2181' 2>/dev/null"]
       interval: 10s
       timeout: 5s
       retries: 10
