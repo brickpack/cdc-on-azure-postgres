@@ -1,0 +1,51 @@
+# Copy to aks/values.local.yaml and fill in real values (gitignored).
+# NO PASSWORDS GO IN THIS FILE. They live in Azure Key Vault under a fixed
+# naming convention and are resolved at runtime:
+#   cdc-<name>-postgres-password
+#   cdc-<name>-mysql-password
+# All of them (both kinds, every instance) must exist in the vault BEFORE
+# install, or the Connect pods will fail to start.
+
+# Image reference Strimzi builds the Kafka Connect image into and pushes to
+# your ACR. The repo does not need to exist beforehand.
+connectImage: PLACEHOLDER_ACR_LOGIN_SERVER/cdc-kafka-connect:7.5-cdc1
+
+# Key Vault holding the database passwords. identityClientId is the Key
+# Vault CSI add-on identity:
+#   az aks show -g <rg> -n <cluster> \
+#     --query addonProfiles.azureKeyvaultSecretsProvider.identity.clientId -o tsv
+keyVault:
+  name: PLACEHOLDER_VAULT_NAME
+  tenantId: PLACEHOLDER_TENANT_ID
+  identityClientId: PLACEHOLDER_IDENTITY_CLIENT_ID
+
+# One entry per database instance (five in total).
+#
+# name must match ^[a-z][a-z0-9]*$ -- it becomes the Kafka topic prefix
+# (cdc-<name>), the Postgres slot + publication name (cdc_<name>), and part
+# of the Key Vault secret names (cdc-<name>-...).
+#
+# The mysql block is that instance's ORIGINAL source MySQL -- the rollback
+# target. Declaring it here (password excluded) means a rollback needs
+# nothing but the instance name.
+instances:
+  - name: billing
+    # Comma-separated schema.table list, e.g. public.orders,public.customers
+    tables: PLACEHOLDER_TABLE_LIST
+    postgres:
+      host: PLACEHOLDER.postgres.database.azure.com
+      port: "5432"
+      user: PLACEHOLDER_USER
+      dbname: PLACEHOLDER_DBNAME
+    mysql:
+      host: PLACEHOLDER.mysql.database.azure.com
+      port: "3306"
+      user: PLACEHOLDER_USER
+      dbname: PLACEHOLDER_DBNAME
+  # - name: orders
+  #   ...
+
+# EMERGENCY ONLY -- always leave this empty here. It is set at rollback time
+# by scripts/deploy-rollback-sink.sh (a list of instance names), never by
+# hand in this file.
+rollback: []

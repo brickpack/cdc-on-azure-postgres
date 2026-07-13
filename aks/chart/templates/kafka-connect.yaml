@@ -1,0 +1,72 @@
+apiVersion: kafka.strimzi.io/v1beta2
+kind: KafkaConnect
+metadata:
+  name: cdc-connect
+  annotations:
+    # Lets Strimzi manage connectors declaratively from the KafkaConnector
+    # resources in connectors.yaml instead of REST API calls.
+    strimzi.io/use-connector-resources: "true"
+spec:
+  replicas: 2
+  bootstrapServers: cdc-kafka-kafka-bootstrap:9092
+  config:
+    # Same Connect cluster identity/settings as docker-compose.yml, with
+    # internal-topic replication raised from 1 to 3.
+    group.id: cdc-rollback-connect-cluster
+    config.storage.topic: cdc-connect-configs
+    offset.storage.topic: cdc-connect-offsets
+    status.storage.topic: cdc-connect-status
+    config.storage.replication.factor: 3
+    offset.storage.replication.factor: 3
+    status.storage.replication.factor: 3
+    key.converter: org.apache.kafka.connect.json.JsonConverter
+    value.converter: org.apache.kafka.connect.json.JsonConverter
+    key.converter.schemas.enable: false
+    value.converter.schemas.enable: false
+    # Resolves ${directory:/mnt/keyvault:<file>} placeholders in connector
+    # configs from the Key Vault CSI mount at runtime, so passwords never
+    # enter the Connect config topic.
+    config.providers: directory
+    config.providers.directory.class: org.apache.kafka.common.config.provider.DirectoryConfigProvider
+  # The Docker environment's image (Confluent cp-kafka-connect base) cannot
+  # run under Strimzi, so Strimzi builds an equivalent image with the same
+  # plugin versions as the Dockerfile and pushes it to ACR.
+  build:
+    output:
+      type: docker
+      image: {{ required "connectImage is required -- set it in aks/values.local.yaml" .Values.connectImage }}
+      pushSecret: {{ .Values.connectPushSecret }}
+    plugins:
+      - name: debezium-connector-postgresql
+        artifacts:
+          - type: tgz
+            url: https://repo1.maven.org/maven2/io/debezium/debezium-connector-postgres/2.4.2.Final/debezium-connector-postgres-2.4.2.Final-plugin.tar.gz
+      - name: kafka-connect-jdbc
+        artifacts:
+          - type: zip
+            url: https://hub-downloads.confluent.io/api/plugins/confluentinc/kafka-connect-jdbc/versions/10.7.4/confluentinc-kafka-connect-jdbc-10.7.4.zip
+          # The Confluent Hub build ships WITHOUT a MySQL JDBC driver (GPL
+          # licensing) -- same reason it is added manually in the Dockerfile.
+          - type: jar
+            url: https://repo1.maven.org/maven2/com/mysql/mysql-connector-j/8.0.33/mysql-connector-j-8.0.33.jar
+  resources:
+    requests:
+      cpu: "1"
+      memory: 2Gi
+    limits:
+      memory: 2Gi
+  # Key Vault passwords, mounted read-only as tmpfs files (one file per
+  # vault secret) -- see templates/keyvault.yaml.
+  template:
+    pod:
+      volumes:
+        - name: keyvault
+          csi:
+            driver: secrets-store.csi.k8s.io
+            readOnly: true
+            volumeAttributes:
+              secretProviderClass: cdc-keyvault
+    connectContainer:
+      volumeMounts:
+        - name: keyvault
+          mountPath: /mnt/keyvault

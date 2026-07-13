@@ -1,0 +1,38 @@
+# Defaults only -- deployment-specific values (instances, ACR, Key Vault)
+# live in aks/values.local.yaml, copied from aks/values.example.yaml.
+# No passwords anywhere: they live in Azure Key Vault and are resolved at
+# runtime (see templates/keyvault.yaml for the naming convention).
+
+# Image reference Strimzi builds the Kafka Connect image into and pushes to
+# your ACR, e.g. myacr.azurecr.io/cdc-kafka-connect:7.5-cdc1. Required.
+connectImage: ""
+
+# docker-registry secret (in the release namespace) with push access to the
+# ACR repo above. See aks/README.md "Prerequisites".
+connectPushSecret: acr-push-credentials
+
+# Azure Key Vault holding the database passwords. Required.
+keyVault:
+  name: ""
+  tenantId: ""
+  # clientId of the identity the CSI driver uses to read the vault, normally
+  # the AKS Key Vault CSI add-on's user-assigned managed identity.
+  identityClientId: ""
+
+# Disk per Kafka broker (3 brokers, replication factor 3). Must hold 7 days
+# -- the rollback window -- of change volume for ALL five databases, plus
+# headroom. A full broker disk silently ends the rollback window: alert on
+# it. Azure Disk CSI supports online expansion if this proves too small.
+kafkaStorageSize: 256Gi
+kafkaStorageClass: managed-csi-premium
+
+# One entry per database instance -- see aks/values.example.yaml. Includes
+# each instance's original MySQL rollback target (minus password), declared
+# up front so a rollback needs nothing but the instance name.
+instances: []
+
+# EMERGENCY ONLY. Leave empty during normal operation; set at rollback time
+# by scripts/deploy-rollback-sink.sh. A listed instance name deploys a JDBC
+# sink that REPLAYS THE CHANGE LOG INTO THE ORIGINAL SOURCE MYSQL declared
+# in that instance's mysql block.
+rollback: []

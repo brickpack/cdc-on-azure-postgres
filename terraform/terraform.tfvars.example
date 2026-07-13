@@ -1,0 +1,30 @@
+# Copy to terraform.tfvars (gitignored) and fill in.
+#
+#   az account show --query id -o tsv
+#   curl -s https://ifconfig.me
+#
+subscription_id = "00000000-0000-0000-0000-000000000000"
+
+# name_prefix  = "cdc"
+# location     = "westus2"
+
+# Defaults are D2ds_v4 (fits ~10 vCPU DDSv4 quota). Prefer D4ds_v4 for CDC
+# once quota allows: system_node_vm_size = "Standard_D2ds_v4",
+# cdc_node_vm_size = "Standard_D4ds_v4".
+
+api_server_authorized_ip_ranges = [
+  "YOUR.PUBLIC.IP.HERE/32",
+]
+
+# Existing Key Vault that already holds Postgres/MySQL passwords. This module
+# does not create a vault -- it only grants the AKS CSI identity read access.
+key_vault_name                = "dbmig-dev-kv"
+key_vault_resource_group_name = "dbmig-dev-rg"
+
+# Optional: peer to VNets that host the five Postgres + MySQL Flexible Servers
+# so the cluster can reach 5432/3306 privately. This module only creates the
+# local half of each peering -- create the remote half (and private DNS) on
+# the database VNet side.
+# peer_vnet_ids = [
+#   "/subscriptions/.../resourceGroups/.../providers/Microsoft.Network/virtualNetworks/...",
+# ]

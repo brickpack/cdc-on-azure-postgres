@@ -1,0 +1,32 @@
+# Mounts every instance's Postgres and MySQL password from Azure Key Vault
+# into the Connect pods (tmpfs) via the AKS Key Vault CSI add-on. Connector
+# configs reference them with ${directory:/mnt/keyvault:<objectName>}, so
+# passwords never appear in Helm values, Kubernetes Secrets, or the Connect
+# config topic.
+#
+# Key Vault secret naming convention (all must exist BEFORE install -- the
+# CSI mount fails otherwise, which doubles as day-one proof that the
+# rollback credentials are actually in the vault):
+#   cdc-<name>-postgres-password
+#   cdc-<name>-mysql-password
+apiVersion: secrets-store.csi.x-k8s.io/v1
+kind: SecretProviderClass
+metadata:
+  name: cdc-keyvault
+spec:
+  provider: azure
+  parameters:
+    keyvaultName: {{ required "keyVault.name is required -- set it in aks/values.local.yaml" .Values.keyVault.name | quote }}
+    tenantId: {{ required "keyVault.tenantId is required" .Values.keyVault.tenantId | quote }}
+    useVMManagedIdentity: "true"
+    userAssignedIdentityID: {{ required "keyVault.identityClientId is required (the Key Vault CSI add-on identity's clientId)" .Values.keyVault.identityClientId | quote }}
+    objects: |
+      array:
+{{- range .Values.instances }}
+        - |
+          objectName: cdc-{{ .name }}-postgres-password
+          objectType: secret
+        - |
+          objectName: cdc-{{ .name }}-mysql-password
+          objectType: secret
+{{- end }}
