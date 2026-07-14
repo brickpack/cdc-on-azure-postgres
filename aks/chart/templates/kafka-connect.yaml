@@ -11,12 +11,7 @@ spec:
   # Image built from the project Dockerfile and pushed to ACR.
   # Run aks/scripts/build-push-connect-image.sh before first deploy or
   # whenever the Dockerfile changes.
-  image:
-    {
-      {
-        required "connectImage is required -- set it in aks/values.local.yaml" .Values.connectImage,
-      },
-    }
+  image: {{ required "connectImage is required -- set it in aks/values.local.yaml" .Values.connectImage }}
   bootstrapServers: cdc-kafka-kafka-bootstrap:9092
   config:
     # Same Connect cluster identity/settings as docker-compose.yml, with
