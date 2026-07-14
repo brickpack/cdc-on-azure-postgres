@@ -59,16 +59,26 @@ postgres flexible-server parameter set --name wal_level --value logical`).
    CREATE USER cdc_replication WITH REPLICATION LOGIN PASSWORD 'PLACEHOLDER_REPLICATION_PASSWORD';
    GRANT CONNECT ON DATABASE POSTGRES_DBNAME TO cdc_replication;
    GRANT SELECT ON ALL TABLES IN SCHEMA public TO cdc_replication;
+   ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO cdc_replication;
    ```
-3. Create the publication covering the tables you want captured:
+3. Create the schema and publication covering **all** tables, and set up the
+   heartbeat table (run as a Postgres superuser / admin):
+
    ```sql
-   CREATE PUBLICATION PUBLICATION_NAME FOR TABLE table1, table2, table3;
+   -- Schema that Debezium writes its heartbeat into
+   CREATE SCHEMA IF NOT EXISTS cdc;
+   GRANT CREATE ON SCHEMA cdc TO cdc_replication;
+
+   -- Capture every table, present and future
+   CREATE PUBLICATION PUBLICATION_NAME FOR ALL TABLES;
+
+   -- Heartbeat table -- required for WAL LSN advancement when no other DML
+   -- hits a published table (see "Heartbeat" in Troubleshooting)
+   CREATE TABLE IF NOT EXISTS cdc.debezium_heartbeat (id int PRIMARY KEY, ts timestamptz);
+   INSERT INTO cdc.debezium_heartbeat (id, ts) VALUES (1, now()) ON CONFLICT DO NOTHING;
+   ALTER PUBLICATION PUBLICATION_NAME ADD TABLE cdc.debezium_heartbeat;
    ```
-   (Debezium's `publication.autocreate.mode=filtered` in
-   `connectors/postgres-source.json` will also create it automatically from
-   `table.include.list` if it doesn't exist yet, as long as the connection
-   user has `CREATE` on the database -- creating it explicitly up front is
-   recommended so you control exactly which tables are included.)
+
 4. Confirm the replication user can create/use logical replication slots
    (this is implicit in the `REPLICATION` role attribute above).
 
@@ -78,8 +88,7 @@ Run this **before** cutover, while pg_chameleon is still the active
 replication path from MySQL to Postgres.
 
 1. Copy `.env.example` to `.env` and fill in real values (Postgres
-   connection details, table list, slot/publication names, Kafka data
-   directory).
+   connection details, slot/publication names, Kafka data directory).
 2. Bring up the stack:
 
    ```bash
@@ -135,14 +144,21 @@ replication path from MySQL to Postgres.
    rather than the `docker compose` V2 plugin. Use `docker-compose` (hyphen)
    if `docker compose` gives an "unknown shorthand flag" error.
 
-3. Deploy the Postgres source connector and watch the initial snapshot:
+3. Deploy the Postgres source connector:
    ```bash
    ./scripts/deploy-postgres-source.sh
    ```
-4. **Do not proceed to cutover until the script reports the snapshot is
-   complete and the connector is RUNNING.** If it times out, check:
+   The script creates the `cdc.debezium_heartbeat` table if it is missing,
+   then submits the connector config. Debezium starts in **streaming mode
+   immediately** (no snapshot -- it captures changes from the point of
+   deploy forward).
+4. Confirm the connector reaches `RUNNING` state:
    ```bash
-   docker compose logs kafka-connect | grep -i snapshot
+   ./scripts/cdc-status.sh
+   ```
+   Or quickly:
+   ```bash
+   curl -s http://localhost:8083/connectors/postgres-source-connector/status | jq .
    ```
 
 ## Cutover procedure
@@ -167,7 +183,36 @@ replication path from MySQL to Postgres.
 
 ## Normal operation
 
-Run the monitor on a schedule (cron, systemd timer, etc):
+### Comprehensive status report
+
+Run this at any time to get a full picture of pipeline health:
+
+```bash
+./scripts/cdc-status.sh
+```
+
+Sections reported:
+
+- **Connector health** — source and sink connector + task state, with the
+  root `Caused by:` line extracted on failure.
+- **WAL replication slot** — bytes of unconsumed WAL in Postgres vs
+  `WAL_THRESHOLD_MB` (`.env`), plus heartbeat freshness (should be ≤10 s).
+- **Consumer group lag** — messages pending per connector.
+- **Kafka-Connect log errors** — any `ERROR`/`Exception` lines from the
+  last hour.
+- **Per-table operation counts** — INSERT / UPDATE / DELETE / TOTAL
+  breakdown across every `cdc.*` topic.
+
+To skip the health checks and see only table stats:
+
+```bash
+./scripts/cdc-status.sh --tables
+```
+
+### Automated health monitor
+
+Run this on a schedule (cron, systemd timer, etc.) -- it exits non-zero if
+anything is wrong, making it suitable for alerting:
 
 ```bash
 ./scripts/monitor-debezium.sh
@@ -314,6 +359,78 @@ Repeat for any image that fails.
 
 ---
 
+**WAL lag frozen / connector stuck at "Searching for WAL resume position"**
+
+Symptom: Debezium connects, transitions to streaming mode, but
+`confirmed_flush_lsn` on the replication slot never advances -- even though
+the connector shows `RUNNING`. WAL lag grows until Postgres storage fills up.
+
+Root cause: the `pgoutput` plugin only sends WAL records for tables that
+are in the publication. If no DML touches those tables, there is nothing
+to confirm. Without `heartbeat.action.query`, Debezium has no way to
+generate its own publishable record to advance the LSN.
+
+Fix: ensure `heartbeat.action.query` is set (it is in
+`connectors/postgres-source.json`) and the heartbeat table exists and is
+in the publication -- see Prerequisites step 3. If the slot is already
+stuck, manually run the heartbeat update once to break the deadlock:
+
+```sql
+UPDATE cdc.debezium_heartbeat SET ts = now() WHERE id = 1;
+```
+
+Then watch `confirmed_flush_lsn` advance in `pg_replication_slots`.
+
+---
+
+**JDBC sink task FAILED: "null key schema"**
+
+Symptom: `mysql-rollback-sink-connector` task fails with a trace containing
+`NullPointerException` or "null key schema" shortly after deployment.
+
+Root cause: `CONNECT_KEY_CONVERTER_SCHEMAS_ENABLE` was `false` when the
+source connector was running. Messages already in the topic have
+schema-less JSON keys. The JDBC sink's `pk.mode=record_key` requires a
+key schema to map types.
+
+Fix: `docker-compose.yml` already has both key and value schema converters
+set to `"true"`. If this error appears it means existing topics contain
+schema-less messages. You must reset the topic (all data in it is lost):
+
+```bash
+# Delete the affected topic -- Kafka recreates it on next produce
+docker compose exec kafka kafka-topics --bootstrap-server localhost:9092 \
+  --delete --topic <topic-name>
+
+# After deletion, verify the internal Connect topics are still compact
+docker compose exec kafka kafka-configs --bootstrap-server localhost:9092 \
+  --entity-type topics --entity-name cdc-connect-offsets --describe | grep cleanup
+# Must show cleanup.policy=compact. If it shows delete, fix it:
+docker compose exec kafka kafka-configs --bootstrap-server localhost:9092 \
+  --entity-type topics --entity-name cdc-connect-offsets \
+  --alter --add-config cleanup.policy=compact
+```
+
+Repeat the `cleanup.policy` check and fix for `cdc-connect-configs` and
+`cdc-connect-status`.
+
+---
+
+**Debezium DELETEs not appearing in MySQL after rollback**
+
+Symptom: rows that were deleted in Postgres still exist in MySQL after
+replay completes.
+
+Root cause: `transforms.unwrap.delete.handling.mode` was `drop` in
+`connectors/type-transforms.json`, which silently discarded every DELETE
+event before it reached the JDBC sink.
+
+Fix: `type-transforms.json` already has `delete.handling.mode: none`.
+If upgrading from an older version, replace `"drop"` with `"none"` in
+that file and redeploy the sink.
+
+---
+
 **Image loads without a tag (`Loaded image ID: sha256:...`)**
 
 `docker buildx build --output type=docker` produces an untagged tar.
@@ -333,3 +450,97 @@ but the healthcheck keeps failing, the four-letter-word command used by the
 check (`ruok`) may be blocked. The healthcheck in `docker-compose.yml` uses
 `srvr` instead, which is always whitelisted by default. If you see this
 after a fresh deploy, confirm you have the latest `docker-compose.yml`.
+
+---
+
+# <!--
+
+AKS DEPLOYMENT
+This section is self-contained and can be moved to aks/README.md (or a
+separate document) when the Docker path is retired.
+================================================================================
+-->
+
+## AKS deployment
+
+The `aks/` directory contains a Helm chart that deploys the same pipeline on
+Azure Kubernetes Service using Strimzi (KRaft, 3-broker cluster) and Azure
+Key Vault CSI for secrets. It supports **multiple database instances** in a
+single cluster -- each instance gets its own Debezium source connector and
+an isolated Kafka topic prefix (`cdc-<name>`).
+
+### Architecture differences from Docker Compose
+
+|                         | Docker Compose                    | AKS (Helm)                                      |
+| ----------------------- | --------------------------------- | ----------------------------------------------- |
+| Kafka                   | ZooKeeper + single broker         | Strimzi KRaft, 3 brokers RF=3                   |
+| Secrets                 | `.env` file on the VM             | Azure Key Vault CSI                             |
+| Connectors deployed via | REST API (`scripts/`)             | `KafkaConnector` CRDs (`helm upgrade`)          |
+| Scale                   | 1 database instance               | Up to N instances (5 declared in `values.yaml`) |
+| Rollback triggered via  | `scripts/deploy-rollback-sink.sh` | `aks/scripts/deploy-rollback-sink.sh`           |
+
+### Quick start
+
+See [`aks/README.md`](aks/README.md) for the full prerequisite checklist
+(Strimzi operator, ACR, Key Vault secrets). The short version:
+
+```bash
+# 1. Copy and fill in values
+cp aks/values.example.yaml aks/values.local.yaml
+# Edit values.local.yaml: set connectImage, keyVault.*, and one instances[]
+# entry per database. NO passwords go in this file.
+
+# 2. Install (first time)
+helm install cdc-rollback aks/chart -n cdc-rollback \
+  -f aks/values.local.yaml
+
+# 3. Upgrade after config changes
+helm upgrade cdc-rollback aks/chart -n cdc-rollback \
+  -f aks/values.local.yaml
+```
+
+### One-time Postgres prerequisites (per instance)
+
+Run as a Postgres superuser on each source database before deploying the
+chart. The publication and heartbeat table names follow a fixed convention
+based on the instance name (`cdc_<name>`):
+
+```sql
+-- Replace <name> with the instance name from values.local.yaml (e.g. billing)
+CREATE SCHEMA IF NOT EXISTS cdc;
+GRANT CREATE ON SCHEMA cdc TO <postgres.user>;
+
+CREATE PUBLICATION cdc_<name> FOR ALL TABLES;
+
+CREATE TABLE IF NOT EXISTS cdc.debezium_heartbeat (id int PRIMARY KEY, ts timestamptz);
+INSERT INTO cdc.debezium_heartbeat (id, ts) VALUES (1, now()) ON CONFLICT DO NOTHING;
+ALTER PUBLICATION cdc_<name> ADD TABLE cdc.debezium_heartbeat;
+```
+
+### Monitoring (AKS mode)
+
+`scripts/cdc-status.sh` supports AKS via `--mode aks`. The Kafka Connect
+REST API must be reachable -- use a port-forward if it is not on a
+LoadBalancer:
+
+```bash
+kubectl port-forward -n cdc-rollback svc/cdc-connect-connect-api 8083:8083 &
+
+CONNECT_URL=http://localhost:8083 \
+POSTGRES_HOST=<host> POSTGRES_PORT=5432 \
+POSTGRES_USER=<user> POSTGRES_PASSWORD=<pass> POSTGRES_DBNAME=<db> \
+SLOT_NAME=cdc_billing \
+  ./scripts/cdc-status.sh --mode aks --instance billing
+```
+
+### Triggering a rollback (AKS)
+
+```bash
+# Reads MySQL target from the deployed Helm values; password from Key Vault
+aks/scripts/deploy-rollback-sink.sh billing
+```
+
+### Rollback window
+
+Same 7-day / 168-hour rule as Docker. Configured in `aks/chart/values.yaml`
+(`kafka.retentionHours`).

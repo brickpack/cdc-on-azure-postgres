@@ -6,8 +6,8 @@
 # All of them (both kinds, every instance) must exist in the vault BEFORE
 # install, or the Connect pods will fail to start.
 
-# Image reference Strimzi builds the Kafka Connect image into and pushes to
-# your ACR. The repo does not need to exist beforehand.
+# Image built from the project Dockerfile and pushed to ACR.
+# Build and push with: aks/scripts/build-push-connect-image.sh
 connectImage: PLACEHOLDER_ACR_LOGIN_SERVER/cdc-kafka-connect:7.5-cdc1
 
 # Key Vault holding the database passwords. identityClientId is the Key
@@ -30,8 +30,6 @@ keyVault:
 # nothing but the instance name.
 instances:
   - name: billing
-    # Comma-separated schema.table list, e.g. public.orders,public.customers
-    tables: PLACEHOLDER_TABLE_LIST
     postgres:
       host: PLACEHOLDER.postgres.database.azure.com
       port: "5432"

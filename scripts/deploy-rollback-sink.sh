@@ -65,6 +65,13 @@ if ! curl -sf "${CONNECT_URL}/connectors" >/dev/null 2>&1; then
 fi
 echo "    OK."
 
+echo "==> Writing MySQL password to Connect container secret mount ..."
+# Mirrors the layout Key Vault CSI produces in AKS. The file lives on a
+# tmpfs so it never touches the VM's disk; gone when the container stops.
+docker compose -f "${ROOT_DIR}/docker-compose.yml" exec -T kafka-connect \
+  bash -c "printf '%s' '${MYSQL_PASSWORD}' > /mnt/keyvault/cdc-${INSTANCE_NAME}-mysql-password"
+echo "    Done."
+
 echo "==> Merging connectors/type-transforms.json into connectors/mysql-sink-standby.json ..."
 MERGED_CONFIG=$(jq -s '
   (.[1] | del(._meta)) as $transforms
@@ -77,11 +84,12 @@ PAYLOAD=$(jq -n \
   --argjson config "$MERGED_CONFIG" \
   --arg url "jdbc:mysql://${MYSQL_HOST}:${MYSQL_PORT}/${MYSQL_DBNAME}?useSSL=true&serverTimezone=UTC" \
   --arg user "$MYSQL_USER" \
-  --arg password "$MYSQL_PASSWORD" \
+  --arg inst "$INSTANCE_NAME" \
   '{name: $name, config: ($config + {
       "connection.url": $url,
       "connection.user": $user,
-      "connection.password": $password
+      "topics.regex": "cdc-\\($inst)\\..*",
+      "connection.password": "${directory:/mnt/keyvault:cdc-\($inst)-mysql-password}"
     })}')
 
 echo "==> Deploying ${CONNECTOR_NAME} ..."

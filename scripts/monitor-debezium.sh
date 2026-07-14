@@ -25,8 +25,9 @@ fi
 : "${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is not set}"
 : "${POSTGRES_DBNAME:?POSTGRES_DBNAME is not set}"
 : "${SLOT_NAME:?SLOT_NAME is not set}"
+: "${INSTANCE_NAME:?INSTANCE_NAME is not set -- check .env}"
 
-SOURCE_CONNECTOR="postgres-source-connector"
+SOURCE_CONNECTOR="postgres-source-${INSTANCE_NAME}"
 OK=1
 RED='\033[0;31m'
 GREEN='\033[0;32m'

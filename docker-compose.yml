@@ -1,40 +1,23 @@
 services:
-  zookeeper:
-    image: confluentinc/cp-zookeeper:7.5.0
-    container_name: cdc-zookeeper
-    restart: unless-stopped
-    environment:
-      ZOOKEEPER_CLIENT_PORT: "2181"
-      ZOOKEEPER_TICK_TIME: "2000"
-    volumes:
-      - ${KAFKA_DATA_DIR:-/kafka-data}/zookeeper/data:/var/lib/zookeeper/data
-      - ${KAFKA_DATA_DIR:-/kafka-data}/zookeeper/log:/var/lib/zookeeper/log
-    networks:
-      - cdc-net
-    healthcheck:
-      test: ["CMD-SHELL", "bash -c '</dev/tcp/localhost/2181' 2>/dev/null"]
-      interval: 10s
-      timeout: 5s
-      retries: 10
-      start_period: 20s
-    logging:
-      driver: json-file
-      options:
-        max-size: "50m"
-        max-file: "3"
-
   kafka:
     image: confluentinc/cp-kafka:7.5.0
     container_name: cdc-kafka
     restart: unless-stopped
-    depends_on:
-      zookeeper:
-        condition: service_healthy
     environment:
-      KAFKA_BROKER_ID: "1"
-      KAFKA_ZOOKEEPER_CONNECT: "zookeeper:2181"
-      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: "PLAINTEXT:PLAINTEXT"
+      # KRaft mode -- no ZooKeeper. Single combined broker+controller node.
+      # CLUSTER_ID must be stable across restarts; generate once with:
+      #   docker run --rm confluentinc/cp-kafka:7.5.0 kafka-storage random-uuid
+      # then set KAFKA_CLUSTER_ID in .env. If the data dir already exists with
+      # a different ID, delete it first (docker compose down -v).
+      KAFKA_NODE_ID: "1"
+      KAFKA_PROCESS_ROLES: "broker,controller"
+      KAFKA_CONTROLLER_QUORUM_VOTERS: "1@kafka:9093"
+      KAFKA_LISTENERS: "PLAINTEXT://0.0.0.0:9092,CONTROLLER://kafka:9093"
       KAFKA_ADVERTISED_LISTENERS: "PLAINTEXT://kafka:9092"
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: "PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT"
+      KAFKA_INTER_BROKER_LISTENER_NAME: "PLAINTEXT"
+      KAFKA_CONTROLLER_LISTENER_NAMES: "CONTROLLER"
+      CLUSTER_ID: "${KAFKA_CLUSTER_ID}"
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: "1"
       # 168 hours = 7 days. This is the rollback window: any Postgres change
       # older than this has been deleted from the log and can no longer be
@@ -85,11 +68,31 @@ services:
       CONNECT_STATUS_STORAGE_REPLICATION_FACTOR: "1"
       CONNECT_KEY_CONVERTER: "org.apache.kafka.connect.json.JsonConverter"
       CONNECT_VALUE_CONVERTER: "org.apache.kafka.connect.json.JsonConverter"
-      CONNECT_KEY_CONVERTER_SCHEMAS_ENABLE: "false"
-      CONNECT_VALUE_CONVERTER_SCHEMAS_ENABLE: "false"
+      CONNECT_KEY_CONVERTER_SCHEMAS_ENABLE: "true"
+      CONNECT_VALUE_CONVERTER_SCHEMAS_ENABLE: "true"
       CONNECT_REST_ADVERTISED_HOST_NAME: "${CONNECT_REST_ADVERTISED_HOST_NAME:-kafka-connect}"
       CONNECT_PLUGIN_PATH: "/usr/share/java,/usr/share/confluent-hub-components"
       CONNECT_LOG4J_ROOT_LOGLEVEL: "INFO"
+      # DirectoryConfigProvider resolves ${directory:/mnt/keyvault:<name>}
+      # placeholders in connector configs at runtime -- same mechanism as AKS
+      # Key Vault CSI. Passwords never appear in connector config payloads.
+      CONNECT_CONFIG_PROVIDERS: "directory"
+      CONNECT_CONFIG_PROVIDERS_DIRECTORY_CLASS: "org.apache.kafka.common.config.provider.DirectoryConfigProvider"
+      # Passed through so the entrypoint can write the password file
+      INSTANCE_NAME: "${INSTANCE_NAME}"
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD}"
+    entrypoint:
+      - /bin/bash
+      - -c
+      - |
+        # Write Postgres password as a file that the DirectoryConfigProvider
+        # reads at runtime -- identical layout to AKS Key Vault CSI mount.
+        # printf with no newline matches how Key Vault CSI writes secrets.
+        mkdir -p /mnt/keyvault
+        printf '%s' "$$POSTGRES_PASSWORD" > /mnt/keyvault/cdc-$$INSTANCE_NAME-postgres-password
+        exec /etc/confluent/docker/run
+    tmpfs:
+      - /mnt/keyvault:uid=1000,gid=1000,mode=0700
     ports:
       - "8083:8083"
     networks:

@@ -1,35 +1,26 @@
 {
-  "name": "postgres-source-connector",
+  "name": "postgres-source-INSTANCE_NAME",
   "config": {
     "connector.class": "io.debezium.connector.postgresql.PostgresConnector",
     "tasks.max": "1",
-
     "database.hostname": "POSTGRES_HOST",
     "database.port": "POSTGRES_PORT",
     "database.user": "POSTGRES_USER",
-    "database.password": "POSTGRES_PASSWORD",
+    "database.password": "${directory:/mnt/keyvault:cdc-INSTANCE_NAME-postgres-password}",
     "database.dbname": "POSTGRES_DBNAME",
-
-    "topic.prefix": "cdc",
-    "table.include.list": "POSTGRES_TABLE_LIST",
-
+    "topic.prefix": "cdc-INSTANCE_NAME",
     "slot.name": "SLOT_NAME",
     "publication.name": "PUBLICATION_NAME",
     "publication.autocreate.mode": "disabled",
     "plugin.name": "pgoutput",
-
-    "snapshot.mode": "initial",
-
+    "snapshot.mode": "never",
     "schema.history.internal.kafka.bootstrap.servers": "kafka:9092",
     "schema.history.internal.kafka.topic": "schema-history.cdc-rollback",
-
     "tombstones.on.delete": "true",
-
     "decimal.handling.mode": "precise",
     "time.precision.mode": "connect",
-
     "heartbeat.interval.ms": "10000",
-
+    "heartbeat.action.query": "UPDATE cdc.debezium_heartbeat SET ts = now() WHERE id = 1",
     "slot.drop.on.stop": "false"
   }
 }

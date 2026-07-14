@@ -27,7 +27,7 @@ One chart, one release. The five instances are entries in one values file;
 - **One shared Kafka cluster (3 brokers, Strimzi, KRaft -- no ZooKeeper)**
   for all five instances, not five stacks. Everything the Compose file runs
   at replication factor 1 runs at RF=3 / `min.insync.replicas=2` here,
-  because on AKS this cluster *is* the rollback plan.
+  because on AKS this cluster _is_ the rollback plan.
 - **Per-instance topic prefix `cdc-<name>`** (the Docker setup uses plain
   `cdc`). This is what makes rollback per-instance safe: each sink's
   `topics.regex` matches only its own instance, so rolling back one database
@@ -56,10 +56,10 @@ One chart, one release. The five instances are entries in one values file;
 - **Rollback targets are declared up front.** Each instance's `mysql:` block
   in `values.local.yaml` names its original source MySQL (no password), so
   triggering a rollback takes nothing but the instance name.
-- **Connect image**: the Compose image (Confluent base) can't run under
-  Strimzi, so the chart uses Strimzi's `build` to produce an image with the
-  exact same plugin versions as the [Dockerfile](../Dockerfile) (Debezium
-  2.4.2, JDBC sink 10.7.4, mysql-connector-j 8.0.33) and push it to ACR.
+- **Connect image**: built from the project [`Dockerfile`](../Dockerfile) and
+  pushed to ACR before first deploy (and after any Dockerfile change) using
+  [`scripts/build-push-connect-image.sh`](scripts/build-push-connect-image.sh).
+  The same image is used locally by Docker Compose for testing.
 
 ## Prerequisites
 
@@ -79,19 +79,20 @@ One chart, one release. The five instances are entries in one values file;
      --version 0.45.0 -n cdc-rollback
    ```
 
-2. **ACR**: the cluster must pull from your ACR (`az aks update -g <rg> -n
-   <cluster> --attach-acr <acr>`), and the Connect image build needs push
-   credentials in the namespace:
+2. **ACR**: the cluster must be able to pull from your ACR:
 
    ```bash
-   az acr token create -r <acr> -n cdc-connect-push \
-     --scope-map _repositories_push  # or a service principal with AcrPush
-   kubectl create secret docker-registry acr-push-credentials \
-     -n cdc-rollback \
-     --docker-server=<acr>.azurecr.io \
-     --docker-username=<token-name> \
-     --docker-password=<token-password>
+   az aks update -g <rg> -n <cluster> --attach-acr <acr>
    ```
+
+   Then build and push the Connect image before deploying:
+
+   ```bash
+   ./aks/scripts/build-push-connect-image.sh
+   ```
+
+   Set `CONNECT_IMAGE` in your environment (or edit the script) if you want
+   a tag other than the default. Re-run whenever the Dockerfile changes.
 
 3. **Key Vault**: the Key Vault CSI add-on enabled
    (`az aks enable-addons --addons azure-keyvault-secrets-provider -g <rg> -n <cluster>`),
@@ -127,7 +128,7 @@ One chart, one release. The five instances are entries in one values file;
    with the publication named by convention:
 
    ```sql
-   CREATE PUBLICATION cdc_<name> FOR TABLE table1, table2;
+   CREATE PUBLICATION cdc_<name> FOR ALL TABLES;
    ```
 
 6. **Capacity**: 3 brokers with 4Gi each plus 2 Connect pods with 2Gi each.
@@ -195,7 +196,7 @@ verification steps. The other four instances keep capturing changes,
 unaffected.
 
 Rolling back several instances at once? `--reuse-values` keeps only the
-*latest* `rollback:` list, so either remove each completed sink
+_latest_ `rollback:` list, so either remove each completed sink
 (`--set rollback=null`) before running the script for the next instance, or
 deploy them together in one upgrade:
 

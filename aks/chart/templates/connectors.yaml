@@ -29,18 +29,18 @@ spec:
     database.password: '${directory:/mnt/keyvault:cdc-{{ .name }}-postgres-password}'
     database.dbname: {{ .postgres.dbname | quote }}
     topic.prefix: cdc-{{ .name }}
-    table.include.list: {{ .tables | quote }}
     # Fixed naming convention: create the publication as cdc_<name> on each
     # server (see aks/README.md "Prerequisites"). Debezium creates the slot.
     slot.name: cdc_{{ .name }}
     publication.name: cdc_{{ .name }}
     publication.autocreate.mode: disabled
     plugin.name: pgoutput
-    snapshot.mode: initial
+    snapshot.mode: never
     tombstones.on.delete: "true"
     decimal.handling.mode: precise
     time.precision.mode: connect
     heartbeat.interval.ms: "10000"
+    heartbeat.action.query: 'UPDATE cdc.debezium_heartbeat SET ts = now() WHERE id = 1'
     slot.drop.on.stop: "false"
 {{- end }}
 {{- /*
@@ -86,7 +86,7 @@ spec:
     transforms: unwrap,routeTopic
     transforms.unwrap.type: io.debezium.transforms.ExtractNewRecordState
     transforms.unwrap.drop.tombstones: "true"
-    transforms.unwrap.delete.handling.mode: drop
+    transforms.unwrap.delete.handling.mode: none
     transforms.routeTopic.type: org.apache.kafka.connect.transforms.RegexRouter
     transforms.routeTopic.regex: '^cdc-{{ $name }}\.[^.]+\.(.+)$'
     transforms.routeTopic.replacement: '$1'
