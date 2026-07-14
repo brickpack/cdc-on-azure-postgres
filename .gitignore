@@ -156,6 +156,7 @@ aks/values.local.yaml
 # Terraform local state / vars (secrets and environment-specific CIDRs).
 # Keep terraform/.terraform.lock.hcl in git.
 terraform/.terraform/
+terraform/.terraform.lock.hcl
 terraform/terraform.tfvars
 terraform/*.tfstate
 terraform/*.tfstate.*
