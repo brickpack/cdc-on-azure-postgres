@@ -107,27 +107,24 @@ replication path from MySQL to Postgres.
      --output type=docker,dest=cdc-kafka-connect.tar .
    gzip cdc-kafka-connect.tar
 
-   # Materialize the base images as single-arch to avoid Docker Desktop
-   # multi-arch manifest issues with docker save
-   echo "FROM confluentinc/cp-zookeeper:7.5.0" | \
-     docker buildx build --platform linux/amd64 --load \
-     -t confluentinc/cp-zookeeper:7.5.0 -
+   # Save the Kafka base image (single-arch to avoid multi-arch manifest issues)
    echo "FROM confluentinc/cp-kafka:7.5.0" | \
      docker buildx build --platform linux/amd64 --load \
      -t confluentinc/cp-kafka:7.5.0 -
 
-   docker save confluentinc/cp-zookeeper:7.5.0 | gzip > cp-zookeeper.tar.gz
    docker save confluentinc/cp-kafka:7.5.0 | gzip > cp-kafka.tar.gz
    ```
 
    Copy to the VM:
 
    ```bash
-   scp cdc-kafka-connect.tar.gz cp-zookeeper.tar.gz cp-kafka.tar.gz \
+   scp cdc-kafka-connect.tar.gz cp-kafka.tar.gz \
      docker-compose.yml .env \
      <user>@<vm-ip>:~/migration/cdc/
-   scp connectors/postgres-source.json <user>@<vm-ip>:~/migration/cdc/connectors/
-   scp scripts/deploy-postgres-source.sh scripts/monitor-debezium.sh \
+   scp connectors/postgres-source.json connectors/mysql-sink-standby.json \
+     connectors/type-transforms.json <user>@<vm-ip>:~/migration/cdc/connectors/
+   scp scripts/deploy-postgres-source.sh scripts/deploy-rollback-sink.sh \
+     scripts/monitor-debezium.sh scripts/cdc-status.sh \
      scripts/teardown.sh <user>@<vm-ip>:~/migration/cdc/scripts/
    ```
 
@@ -135,14 +132,10 @@ replication path from MySQL to Postgres.
 
    ```bash
    docker load < cdc-kafka-connect.tar.gz
-   docker load < cp-zookeeper.tar.gz
+   docker tag $(docker images -q | head -1) cdc-kafka-connect:latest
    docker load < cp-kafka.tar.gz
-   docker-compose up -d
+   docker compose up -d
    ```
-
-   Note: locked-down VMs typically have the older `docker-compose` (V1)
-   rather than the `docker compose` V2 plugin. Use `docker-compose` (hyphen)
-   if `docker compose` gives an "unknown shorthand flag" error.
 
 3. Deploy the Postgres source connector:
    ```bash
@@ -156,9 +149,9 @@ replication path from MySQL to Postgres.
    ```bash
    ./scripts/cdc-status.sh
    ```
-   Or quickly:
+   Or quickly (substitute your `INSTANCE_NAME` value):
    ```bash
-   curl -s http://localhost:8083/connectors/postgres-source-connector/status | jq .
+   curl -s http://localhost:8083/connectors/postgres-source-${INSTANCE_NAME}/status | jq .
    ```
 
 ## Cutover procedure
@@ -169,14 +162,14 @@ replication path from MySQL to Postgres.
 2. Flip application connection strings from MySQL to Postgres.
 3. Confirm Debezium is capturing changes:
    ```bash
-   curl -s http://localhost:8083/connectors/postgres-source-connector/status | jq .
+   curl -s http://localhost:8083/connectors/postgres-source-${INSTANCE_NAME}/status | jq .
    ```
    Make a small test write against Postgres and confirm a record appears
-   on its topic:
+   on its topic (topics are named `cdc-<INSTANCE_NAME>.<schema>.<table>`):
    ```bash
    docker compose exec kafka kafka-console-consumer \
      --bootstrap-server localhost:9092 \
-     --topic cdc.<schema>.<table> --from-beginning --max-messages 1
+     --topic cdc-${INSTANCE_NAME}.<schema>.<table> --from-beginning --max-messages 1
    ```
 4. **Keep the original MySQL server running and idle.** Do not stop or
    decommission it -- it is your rollback target.
@@ -200,13 +193,18 @@ Sections reported:
 - **Consumer group lag** — messages pending per connector.
 - **Kafka-Connect log errors** — any `ERROR`/`Exception` lines from the
   last hour.
-- **Per-table operation counts** — INSERT / UPDATE / DELETE / TOTAL
-  breakdown across every `cdc.*` topic.
+- **Per-table message counts** — total messages per `cdc-<INSTANCE_NAME>.*` topic.
 
-To skip the health checks and see only table stats:
+To skip the health checks and show only table counts (fast):
 
 ```bash
 ./scripts/cdc-status.sh --tables
+```
+
+To also show INSERT / UPDATE / DELETE breakdown (reads every message — slow on large topics):
+
+```bash
+./scripts/cdc-status.sh --tables --ops
 ```
 
 ### Automated health monitor
@@ -349,10 +347,10 @@ Docker Desktop on Apple Silicon caches multi-arch manifest indices that
 single-arch image into the local daemon before saving:
 
 ```bash
-echo "FROM confluentinc/cp-zookeeper:7.5.0" | \
+echo "FROM confluentinc/cp-kafka:7.5.0" | \
   docker buildx build --platform linux/amd64 --load \
-  -t confluentinc/cp-zookeeper:7.5.0 -
-docker save confluentinc/cp-zookeeper:7.5.0 | gzip > cp-zookeeper.tar.gz
+  -t confluentinc/cp-kafka:7.5.0 -
+docker save confluentinc/cp-kafka:7.5.0 | gzip > cp-kafka.tar.gz
 ```
 
 Repeat for any image that fails.
