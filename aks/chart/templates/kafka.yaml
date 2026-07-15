@@ -1,5 +1,5 @@
 # Shared Kafka cluster for all five CDC instances, managed by the Strimzi
-# operator (KRaft mode -- no ZooKeeper, unlike the Docker Compose stack).
+# operator (KRaft mode, same as the Docker Compose stack).
 apiVersion: kafka.strimzi.io/v1beta2
 kind: KafkaNodePool
 metadata:
@@ -16,8 +16,8 @@ spec:
     volumes:
       - id: 0
         type: persistent-claim
-        size: {{ .Values.kafkaStorageSize }}
-        class: {{ .Values.kafkaStorageClass }}
+        size: { { .Values.kafkaStorageSize } }
+        class: { { .Values.kafkaStorageClass } }
         kraftMetadata: shared
         # Keep the disks (= the rollback log) even if the cluster resource is
         # deleted by accident.

@@ -1,21 +1,18 @@
 #!/usr/bin/env bash
-# Full CDC pipeline status report.
+# Full CDC pipeline status report (Docker Compose).
 # Shows connector health, WAL lag, per-table operation counts, and any errors.
 # Safe to run at any time -- read-only, no side effects.
 #
-# Usage (Docker):
+# Usage:
 #   ./scripts/cdc-status.sh                          # full report (only instance, if just one configured)
 #   ./scripts/cdc-status.sh --instance billing       # full report for one instance (required if multiple configured)
 #   ./scripts/cdc-status.sh --instance billing --tables               # topic totals only (fast)
 #   ./scripts/cdc-status.sh --instance billing --tables --ops         # topic totals + INSERT/UPDATE/DELETE breakdown (slow)
 #
-# Usage (AKS):
-#   ./scripts/cdc-status.sh --mode aks --instance billing
-#   ./scripts/cdc-status.sh --mode aks --instance billing --tables
-#   ./scripts/cdc-status.sh --mode aks --instance billing --tables --ops
-#
 # --ops reads every message in every topic to count operation types.
 # With large topics (thousands of messages) this takes minutes.
+#
+# AKS equivalent: aks/scripts/cdc-status.sh
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -32,14 +29,12 @@ fi
 # ---------------------------------------------------------------------------
 # Argument parsing
 # ---------------------------------------------------------------------------
-MODE="docker"        # docker | aks
-INSTANCE=""          # AKS instance name (e.g. billing); empty in docker mode
+INSTANCE=""
 TABLES_ONLY="false"
 OPS_DETAIL="false"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --mode)      MODE="$2";     shift 2 ;;
     --instance)  INSTANCE="$2"; shift 2 ;;
     --tables)    TABLES_ONLY="true"; shift ;;
     --ops)       OPS_DETAIL="true"; shift ;;
@@ -47,89 +42,57 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-if [[ "$MODE" == "aks" && -z "$INSTANCE" ]]; then
-  echo "ERROR: --instance <name> is required in AKS mode" >&2
-  exit 1
-fi
-
 # ---------------------------------------------------------------------------
-# Mode-specific settings
+# Instance settings
 # ---------------------------------------------------------------------------
 : "${CONNECT_URL:=http://localhost:8083}"
 : "${WAL_THRESHOLD_MB:=5000}"
 
-if [[ "$MODE" == "docker" ]]; then
-  INSTANCES_DIR="${ROOT_DIR}/instances"
-  if [[ -n "$INSTANCE" ]]; then
-    INSTANCE_ENV_FILE="${INSTANCES_DIR}/${INSTANCE}.env"
-    [[ -f "$INSTANCE_ENV_FILE" ]] || { echo "ERROR: ${INSTANCE_ENV_FILE} not found." >&2; exit 1; }
-  else
-    shopt -s nullglob
-    candidates=("${INSTANCES_DIR}"/*.env)
-    shopt -u nullglob
-    if [[ ${#candidates[@]} -eq 0 ]]; then
-      echo "ERROR: no instance env files found in ${INSTANCES_DIR}. Copy instances/example.env.example to instances/<name>.env, or pass --instance <name>." >&2
-      exit 1
-    elif [[ ${#candidates[@]} -gt 1 ]]; then
-      echo "ERROR: multiple instances configured -- pass --instance <name> to pick one:" >&2
-      for c in "${candidates[@]}"; do echo "  $(basename "$c" .env)" >&2; done
-      exit 1
-    fi
-    INSTANCE_ENV_FILE="${candidates[0]}"
-  fi
-
-  set -a
-  # shellcheck disable=SC1090
-  source "$INSTANCE_ENV_FILE"
-  set +a
-  : "${INSTANCE_NAME:?INSTANCE_NAME is not set in ${INSTANCE_ENV_FILE}}"
-  : "${POSTGRES_HOST:?POSTGRES_HOST is not set in ${INSTANCE_ENV_FILE}}"
-  : "${POSTGRES_PORT:?POSTGRES_PORT is not set in ${INSTANCE_ENV_FILE}}"
-  : "${POSTGRES_USER:?POSTGRES_USER is not set in ${INSTANCE_ENV_FILE}}"
-  : "${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is not set in ${INSTANCE_ENV_FILE}}"
-  : "${POSTGRES_DBNAME:?POSTGRES_DBNAME is not set in ${INSTANCE_ENV_FILE}}"
-  : "${SLOT_NAME:?SLOT_NAME is not set in ${INSTANCE_ENV_FILE}}"
-
-  TOPIC_PREFIX="cdc-${INSTANCE_NAME}"
-  SOURCE_CONNECTOR="postgres-source-${INSTANCE_NAME}"
-  SINK_CONNECTOR="mysql-rollback-sink-${INSTANCE_NAME}"
-  COMPOSE_FILE="${ROOT_DIR}/docker-compose.yml"
-  NAMESPACE=""
-  KAFKA_POD=""
-  INSTANCE="$INSTANCE_NAME"
+INSTANCES_DIR="${ROOT_DIR}/instances"
+if [[ -n "$INSTANCE" ]]; then
+  INSTANCE_ENV_FILE="${INSTANCES_DIR}/${INSTANCE}.env"
+  [[ -f "$INSTANCE_ENV_FILE" ]] || { echo "ERROR: ${INSTANCE_ENV_FILE} not found." >&2; exit 1; }
 else
-  : "${POSTGRES_HOST:?POSTGRES_HOST is not set}"
-  : "${POSTGRES_PORT:?POSTGRES_PORT is not set}"
-  : "${POSTGRES_USER:?POSTGRES_USER is not set}"
-  : "${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is not set}"
-  : "${POSTGRES_DBNAME:?POSTGRES_DBNAME is not set}"
-  : "${SLOT_NAME:?SLOT_NAME is not set}"
-  : "${CDC_NAMESPACE:=cdc-rollback}"
-  NAMESPACE="$CDC_NAMESPACE"
-  KAFKA_POD="${CDC_KAFKA_POD:-cdc-kafka-broker-0}"
-  TOPIC_PREFIX="cdc-${INSTANCE}"
-  SOURCE_CONNECTOR="postgres-source-${INSTANCE}"
-  SINK_CONNECTOR="mysql-rollback-sink-${INSTANCE}"
-  COMPOSE_FILE=""
+  shopt -s nullglob
+  candidates=("${INSTANCES_DIR}"/*.env)
+  shopt -u nullglob
+  if [[ ${#candidates[@]} -eq 0 ]]; then
+    echo "ERROR: no instance env files found in ${INSTANCES_DIR}. Copy instances/example.env.example to instances/<name>.env, or pass --instance <name>." >&2
+    exit 1
+  elif [[ ${#candidates[@]} -gt 1 ]]; then
+    echo "ERROR: multiple instances configured -- pass --instance <name> to pick one:" >&2
+    for c in "${candidates[@]}"; do echo "  $(basename "$c" .env)" >&2; done
+    exit 1
+  fi
+  INSTANCE_ENV_FILE="${candidates[0]}"
 fi
+
+set -a
+# shellcheck disable=SC1090
+source "$INSTANCE_ENV_FILE"
+set +a
+: "${INSTANCE_NAME:?INSTANCE_NAME is not set in ${INSTANCE_ENV_FILE}}"
+: "${POSTGRES_HOST:?POSTGRES_HOST is not set in ${INSTANCE_ENV_FILE}}"
+: "${POSTGRES_PORT:?POSTGRES_PORT is not set in ${INSTANCE_ENV_FILE}}"
+: "${POSTGRES_USER:?POSTGRES_USER is not set in ${INSTANCE_ENV_FILE}}"
+: "${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is not set in ${INSTANCE_ENV_FILE}}"
+: "${POSTGRES_DBNAME:?POSTGRES_DBNAME is not set in ${INSTANCE_ENV_FILE}}"
+: "${SLOT_NAME:?SLOT_NAME is not set in ${INSTANCE_ENV_FILE}}"
+
+TOPIC_PREFIX="cdc-${INSTANCE_NAME}"
+SOURCE_CONNECTOR="postgres-source-${INSTANCE_NAME}"
+SINK_CONNECTOR="mysql-rollback-sink-${INSTANCE_NAME}"
+COMPOSE_FILE="${ROOT_DIR}/docker-compose.yml"
+INSTANCE="$INSTANCE_NAME"
 
 # Wrapper: run a Kafka CLI command in the right environment
 kafka_cmd() {
-  if [[ "$MODE" == "docker" ]]; then
-    docker compose -f "${ROOT_DIR}/docker-compose.yml" exec -T kafka "$@" </dev/null
-  else
-    kubectl exec -n "$NAMESPACE" "$KAFKA_POD" -c kafka -- "$@" </dev/null
-  fi
+  docker compose -f "${ROOT_DIR}/docker-compose.yml" exec -T kafka "$@" </dev/null
 }
 
 # Wrapper: tail kafka-connect logs
 connect_logs() {
-  if [[ "$MODE" == "docker" ]]; then
-    docker compose -f "${ROOT_DIR}/docker-compose.yml" logs --since=1h kafka-connect 2>/dev/null
-  else
-    kubectl logs -n "$NAMESPACE" -l strimzi.io/cluster=cdc-connect \
-      --since=1h --prefix 2>/dev/null
-  fi
+  docker compose -f "${ROOT_DIR}/docker-compose.yml" logs --since=1h kafka-connect 2>/dev/null
 }
 
 RED='\033[0;31m'
@@ -377,9 +340,7 @@ show_table_stats() {
 # ===========================================================================
 # Main
 # ===========================================================================
-MODE_TAG="(docker: ${INSTANCE})"
-[[ "$MODE" == "aks" ]] && MODE_TAG="(aks: ${NAMESPACE}/${INSTANCE})"
-echo -e "${BOLD}CDC Pipeline Status Report — $(date '+%Y-%m-%d %H:%M:%S %Z') ${MODE_TAG}${NC}"
+echo -e "${BOLD}CDC Pipeline Status Report — $(date '+%Y-%m-%d %H:%M:%S %Z') (docker: ${INSTANCE})${NC}"
 
 if [[ "$TABLES_ONLY" != "true" ]]; then
   header "CONNECTOR HEALTH"

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # EMERGENCY USE ONLY.
 #
-# AKS/Helm equivalent of scripts/deploy-rollback-sink.sh. Deploys the JDBC
+# AKS/Helm equivalent of docker/scripts/deploy-rollback-sink.sh. Deploys the JDBC
 # sink for ONE instance, pointed at that instance's original source MySQL
 # (declared in aks/values.local.yaml; password read from Key Vault at
 # runtime), and starts replaying every change queued in Kafka since cutover.

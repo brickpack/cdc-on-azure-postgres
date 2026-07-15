@@ -3,8 +3,9 @@
 Runs the CDC rollback pipeline on an existing AKS cluster for any number of
 database instances -- each its own Azure Postgres Flexible Server with its
 own original MySQL rollback target, each optionally backed by its own
-Azure Key Vault. The Docker Compose setup in the repo root is unchanged and
-remains the single-VM path; everything AKS lives in this folder.
+Azure Key Vault. The Docker Compose setup lives in [`../docker/`](../docker/)
+and remains the single-VM path; everything AKS -- including the Terraform
+that provisions the cluster -- lives in this folder.
 
 Read the main [README](../README.md) first -- the architecture, rollback
 window, type-transform validation, and rollback checklist all apply
@@ -16,7 +17,10 @@ unchanged. This file only covers what is different on AKS.
 aks/
   chart/                      Helm chart: Kafka + Kafka Connect (Strimzi) + connectors
   values.example.yaml         copy to aks/values.local.yaml (gitignored) and fill in
+  terraform/                  provisions the AKS cluster + ACR + Key Vault (optional)
+  scripts/build-push-connect-image.sh   build & push the Connect image to ACR
   scripts/deploy-rollback-sink.sh   emergency rollback, per instance
+  scripts/cdc-status.sh             health/status report, per instance
 ```
 
 One chart, one release. Instances are entries in one values file -- add as
@@ -25,10 +29,10 @@ Vault; `helm upgrade` is the only deployment mechanism.
 
 ## Design decisions
 
-- **One shared Kafka cluster (3 brokers, Strimzi, KRaft -- no ZooKeeper)**
-  for every instance, not one stack per instance. Everything the Compose
-  file runs at replication factor 1 runs at RF=3 / `min.insync.replicas=2`
-  here, because on AKS this cluster _is_ the rollback plan.
+- **One shared Kafka cluster (3 brokers, Strimzi, KRaft)** for every
+  instance, not one stack per instance. Everything the Compose file runs
+  at replication factor 1 runs at RF=3 / `min.insync.replicas=2` here,
+  because on AKS this cluster _is_ the rollback plan.
 - **Per-instance topic prefix `cdc-<name>`** (the Docker setup uses plain
   `cdc`). This is what makes rollback per-instance safe: each sink's
   `topics.regex` matches only its own instance, so rolling back one database
@@ -40,7 +44,7 @@ Vault; `helm upgrade` is the only deployment mechanism.
 - **Connectors are `KafkaConnector` resources** managed by Strimzi, so the
   Docker REST-API deploy scripts have no AKS equivalent -- `helm upgrade` is
   the deploy. The `schema.history.internal.*` settings from
-  `connectors/postgres-source.json` are dropped: the Postgres connector
+  `../docker/connectors/postgres-source.json` are dropped: the Postgres connector
   doesn't use them (they matter for the MySQL/SQL Server connectors).
 - **All passwords live in Azure Key Vault, nowhere else -- one Key Vault
   reference per instance, not one shared vault.** Each `instances[]` entry
@@ -79,14 +83,15 @@ Vault; `helm upgrade` is the only deployment mechanism.
 - **Connect image**: built from the project [`Dockerfile`](../Dockerfile) and
   pushed to ACR before first deploy (and after any Dockerfile change) using
   [`scripts/build-push-connect-image.sh`](scripts/build-push-connect-image.sh).
-  The same image is used locally by Docker Compose for testing.
+  The Dockerfile lives at the repo root because it's genuinely shared: the
+  same image is also built locally by [`../docker/docker-compose.yml`](../docker/docker-compose.yml).
 
 ## Prerequisites
 
 0. **AKS cluster** -- this folder assumes one already exists. To create a
    dedicated, cost-minimized stack (RG, VNet, ACR, Key Vault, AKS + CDC
    node pool) with no dependency on other Azure resources, use
-   [`../terraform/`](../terraform/).
+   [`terraform/`](terraform/).
 
 1. **Strimzi operator** installed and watching your target namespace, a
    0.45.x release (supports Kafka 3.9.0, which the chart pins -- newer
@@ -188,7 +193,17 @@ kubectl exec -n cdc-rollback cdc-kafka-broker-0 -c kafka -- \
 
 ## Normal operation
 
-`scripts/monitor-debezium.sh` is Docker-specific; the AKS equivalents:
+Run a full status report at any time (connector health, WAL lag, consumer
+lag, recent errors -- see the main README for the equivalent Docker report):
+
+```bash
+POSTGRES_HOST=... POSTGRES_PORT=5432 POSTGRES_USER=... POSTGRES_PASSWORD=... \
+POSTGRES_DBNAME=... SLOT_NAME=cdc_billing \
+  ./aks/scripts/cdc-status.sh --instance billing
+```
+
+`scripts/monitor-debezium.sh` in the main README is Docker-specific; the AKS
+equivalents (also what `cdc-status.sh` checks above):
 
 - **Connector state** (the critical one -- every minute a source is down is
   a gap in that instance's change log):

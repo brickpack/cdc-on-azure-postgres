@@ -4,7 +4,7 @@ services:
     container_name: cdc-kafka
     restart: unless-stopped
     environment:
-      # KRaft mode -- no ZooKeeper. Single combined broker+controller node.
+      # KRaft mode. Single combined broker+controller node.
       # CLUSTER_ID must be stable across restarts; generate once with:
       #   docker run --rm confluentinc/cp-kafka:7.5.0 kafka-storage random-uuid
       # then set KAFKA_CLUSTER_ID in .env. If the data dir already exists with
@@ -48,7 +48,7 @@ services:
 
   kafka-connect:
     build:
-      context: .
+      context: ..
       dockerfile: Dockerfile
     image: cdc-kafka-connect:latest
     container_name: cdc-kafka-connect
