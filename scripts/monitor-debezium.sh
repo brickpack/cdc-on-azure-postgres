@@ -3,12 +3,17 @@
 # e.g. from cron, during the rollback window. Exits non-zero if anything
 # needs attention so it can also be used as a simple alerting trigger.
 #
+# Usage:
+#   ./monitor-debezium.sh                       # check every instance under instances/
+#   ./monitor-debezium.sh --instance billing    # check just one instance
+#
 #   */15 * * * * /path/to/scripts/monitor-debezium.sh >> /var/log/cdc-monitor.log 2>&1
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(dirname "$SCRIPT_DIR")"
 ENV_FILE="${ROOT_DIR}/.env"
+INSTANCES_DIR="${ROOT_DIR}/instances"
 
 if [[ -f "$ENV_FILE" ]]; then
   set -a
@@ -19,45 +24,111 @@ fi
 
 : "${CONNECT_URL:=http://localhost:8083}"
 : "${WAL_THRESHOLD_MB:=5000}"
-: "${POSTGRES_HOST:?POSTGRES_HOST is not set -- check .env}"
-: "${POSTGRES_PORT:?POSTGRES_PORT is not set}"
-: "${POSTGRES_USER:?POSTGRES_USER is not set}"
-: "${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is not set}"
-: "${POSTGRES_DBNAME:?POSTGRES_DBNAME is not set}"
-: "${SLOT_NAME:?SLOT_NAME is not set}"
-: "${INSTANCE_NAME:?INSTANCE_NAME is not set -- check .env}"
 
-SOURCE_CONNECTOR="postgres-source-${INSTANCE_NAME}"
-OK=1
+INSTANCE=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --instance) INSTANCE="$2"; shift 2 ;;
+    *) echo "Unknown argument: $1" >&2; exit 1 ;;
+  esac
+done
+
+if [[ -n "$INSTANCE" ]]; then
+  INSTANCE_FILES=("${INSTANCES_DIR}/${INSTANCE}.env")
+  [[ -f "${INSTANCE_FILES[0]}" ]] || { echo "ERROR: ${INSTANCE_FILES[0]} not found." >&2; exit 1; }
+else
+  shopt -s nullglob
+  INSTANCE_FILES=("${INSTANCES_DIR}"/*.env)
+  shopt -u nullglob
+  if [[ ${#INSTANCE_FILES[@]} -eq 0 ]]; then
+    echo "ERROR: no instance env files found in ${INSTANCES_DIR} -- copy instances/example.env.example to instances/<name>.env first." >&2
+    exit 1
+  fi
+fi
+
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 NC='\033[0m'
 
+OVERALL_OK=1
+
 echo "=== CDC rollback pipeline health check: $(date '+%Y-%m-%d %H:%M:%S %Z') ==="
 
-# --- 1. Debezium source connector status ----------------------------------
-STATUS_JSON=$(curl -sf "${CONNECT_URL}/connectors/${SOURCE_CONNECTOR}/status" 2>/dev/null || echo '')
-if [[ -z "$STATUS_JSON" ]]; then
-  echo -e "${RED}[FAIL]${NC} Could not reach Kafka Connect REST API or connector '${SOURCE_CONNECTOR}' not found."
-  OK=0
-else
-  CONNECTOR_STATE=$(echo "$STATUS_JSON" | jq -r '.connector.state // "UNKNOWN"')
-  TASK_STATE=$(echo "$STATUS_JSON" | jq -r '.tasks[0].state // "UNKNOWN"')
-  if [[ "$CONNECTOR_STATE" == "RUNNING" && "$TASK_STATE" == "RUNNING" ]]; then
-    echo -e "${GREEN}[OK]${NC}   ${SOURCE_CONNECTOR}: connector=${CONNECTOR_STATE} task=${TASK_STATE}"
-  else
-    echo -e "${RED}[FAIL]${NC} ${SOURCE_CONNECTOR}: connector=${CONNECTOR_STATE} task=${TASK_STATE}"
-    OK=0
-  fi
-fi
+check_instance() {
+  local instance_env="$1"
+  (
+    set -a
+    # shellcheck disable=SC1090
+    source "$instance_env"
+    set +a
 
-# --- 2. Kafka consumer lag across all consumer groups ----------------------
+    : "${POSTGRES_HOST:?POSTGRES_HOST is not set in ${instance_env}}"
+    : "${POSTGRES_PORT:?POSTGRES_PORT is not set in ${instance_env}}"
+    : "${POSTGRES_USER:?POSTGRES_USER is not set in ${instance_env}}"
+    : "${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is not set in ${instance_env}}"
+    : "${POSTGRES_DBNAME:?POSTGRES_DBNAME is not set in ${instance_env}}"
+    : "${SLOT_NAME:?SLOT_NAME is not set in ${instance_env}}"
+    : "${INSTANCE_NAME:?INSTANCE_NAME is not set in ${instance_env}}"
+
+    SOURCE_CONNECTOR="postgres-source-${INSTANCE_NAME}"
+    INSTANCE_OK=1
+
+    echo "--- Instance: ${INSTANCE_NAME} ---"
+
+    # --- 1. Debezium source connector status --------------------------------
+    STATUS_JSON=$(curl -sf "${CONNECT_URL}/connectors/${SOURCE_CONNECTOR}/status" 2>/dev/null || echo '')
+    if [[ -z "$STATUS_JSON" ]]; then
+      echo -e "${RED}[FAIL]${NC} Could not reach Kafka Connect REST API or connector '${SOURCE_CONNECTOR}' not found."
+      INSTANCE_OK=0
+    else
+      CONNECTOR_STATE=$(echo "$STATUS_JSON" | jq -r '.connector.state // "UNKNOWN"')
+      TASK_STATE=$(echo "$STATUS_JSON" | jq -r '.tasks[0].state // "UNKNOWN"')
+      if [[ "$CONNECTOR_STATE" == "RUNNING" && "$TASK_STATE" == "RUNNING" ]]; then
+        echo -e "${GREEN}[OK]${NC}   ${SOURCE_CONNECTOR}: connector=${CONNECTOR_STATE} task=${TASK_STATE}"
+      else
+        echo -e "${RED}[FAIL]${NC} ${SOURCE_CONNECTOR}: connector=${CONNECTOR_STATE} task=${TASK_STATE}"
+        INSTANCE_OK=0
+      fi
+    fi
+
+    # --- 2. Postgres replication slot WAL size -------------------------------
+    SLOT_QUERY="SELECT pg_wal_lsn_diff(pg_current_wal_lsn(), confirmed_flush_lsn) FROM pg_replication_slots WHERE slot_name = '${SLOT_NAME}';"
+    SLOT_LAG_BYTES=$(PGPASSWORD="$POSTGRES_PASSWORD" docker run --rm -e PGPASSWORD \
+      postgres:16-alpine \
+      psql -h "$POSTGRES_HOST" -p "$POSTGRES_PORT" -U "$POSTGRES_USER" -d "$POSTGRES_DBNAME" \
+      -t -A -c "$SLOT_QUERY" 2>/dev/null | tr -d '[:space:]')
+
+    if [[ -z "$SLOT_LAG_BYTES" ]]; then
+      echo -e "${RED}[FAIL]${NC} Could not read replication slot '${SLOT_NAME}' (slot missing, or Postgres unreachable)."
+      INSTANCE_OK=0
+    else
+      SLOT_LAG_MB=$(( SLOT_LAG_BYTES / 1048576 ))
+      if [[ "$SLOT_LAG_MB" -ge "$WAL_THRESHOLD_MB" ]]; then
+        echo -e "${RED}[WARN]${NC} Replication slot '${SLOT_NAME}' WAL lag: ${SLOT_LAG_MB} MB (threshold: ${WAL_THRESHOLD_MB} MB)."
+        echo -e "${RED}[WARN]${NC} Debezium is falling behind -- if this keeps growing, Postgres WAL disk usage grows unbounded until the slot is caught up or dropped."
+        INSTANCE_OK=0
+      else
+        echo -e "${GREEN}[OK]${NC}   Replication slot '${SLOT_NAME}' WAL lag: ${SLOT_LAG_MB} MB (threshold: ${WAL_THRESHOLD_MB} MB)."
+      fi
+    fi
+
+    exit $(( 1 - INSTANCE_OK ))
+  )
+}
+
+for f in "${INSTANCE_FILES[@]}"; do
+  if ! check_instance "$f"; then
+    OVERALL_OK=0
+  fi
+done
+
+# --- Kafka consumer lag across all consumer groups (shared across instances) -
 GROUPS=$(docker compose -f "${ROOT_DIR}/docker-compose.yml" exec -T kafka \
   kafka-consumer-groups --bootstrap-server localhost:9092 --list 2>/dev/null || true)
 
 if [[ -z "$GROUPS" ]]; then
-  echo -e "${YELLOW}[INFO]${NC} No active consumer groups (expected during normal operation -- the sink is idle)."
+  echo -e "${YELLOW}[INFO]${NC} No active consumer groups (expected during normal operation -- sinks are idle)."
 else
   while IFS= read -r GROUP; do
     [[ -z "$GROUP" ]] && continue
@@ -72,30 +143,9 @@ else
   done <<< "$GROUPS"
 fi
 
-# --- 3. Postgres replication slot WAL size ----------------------------------
-SLOT_QUERY="SELECT pg_wal_lsn_diff(pg_current_wal_lsn(), confirmed_flush_lsn) FROM pg_replication_slots WHERE slot_name = '${SLOT_NAME}';"
-SLOT_LAG_BYTES=$(PGPASSWORD="$POSTGRES_PASSWORD" docker run --rm -e PGPASSWORD \
-  postgres:16-alpine \
-  psql -h "$POSTGRES_HOST" -p "$POSTGRES_PORT" -U "$POSTGRES_USER" -d "$POSTGRES_DBNAME" \
-  -t -A -c "$SLOT_QUERY" 2>/dev/null | tr -d '[:space:]')
-
-if [[ -z "$SLOT_LAG_BYTES" ]]; then
-  echo -e "${RED}[FAIL]${NC} Could not read replication slot '${SLOT_NAME}' (slot missing, or Postgres unreachable)."
-  OK=0
-else
-  SLOT_LAG_MB=$(( SLOT_LAG_BYTES / 1048576 ))
-  if [[ "$SLOT_LAG_MB" -ge "$WAL_THRESHOLD_MB" ]]; then
-    echo -e "${RED}[WARN]${NC} Replication slot '${SLOT_NAME}' WAL lag: ${SLOT_LAG_MB} MB (threshold: ${WAL_THRESHOLD_MB} MB)."
-    echo -e "${RED}[WARN]${NC} Debezium is falling behind -- if this keeps growing, Postgres WAL disk usage grows unbounded until the slot is caught up or dropped."
-    OK=0
-  else
-    echo -e "${GREEN}[OK]${NC}   Replication slot '${SLOT_NAME}' WAL lag: ${SLOT_LAG_MB} MB (threshold: ${WAL_THRESHOLD_MB} MB)."
-  fi
-fi
-
 # --- Summary -----------------------------------------------------------------
 echo
-if [[ "$OK" -eq 1 ]]; then
+if [[ "$OVERALL_OK" -eq 1 ]]; then
   echo -e "${GREEN}STATUS: HEALTHY${NC}"
   exit 0
 else

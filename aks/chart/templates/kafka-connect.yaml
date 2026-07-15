@@ -27,9 +27,9 @@ spec:
     value.converter: org.apache.kafka.connect.json.JsonConverter
     key.converter.schemas.enable: "true"
     value.converter.schemas.enable: "true"
-    # Resolves ${directory:/mnt/keyvault:<file>} placeholders in connector
-    # configs from the Key Vault CSI mount at runtime, so passwords never
-    # enter the Connect config topic.
+    # Resolves ${directory:/mnt/keyvault-<name>:<file>} placeholders in
+    # connector configs from each enabled instance's Key Vault CSI mount at
+    # runtime, so passwords never enter the Connect config topic.
     config.providers: directory
     config.providers.directory.class: org.apache.kafka.common.config.provider.DirectoryConfigProvider
   resources:
@@ -38,18 +38,28 @@ spec:
       memory: 2Gi
     limits:
       memory: 2Gi
-  # Key Vault passwords, mounted read-only as tmpfs files (one file per
-  # vault secret) -- see templates/keyvault.yaml.
+  # One Key Vault mount per enabled instance, each read-only as tmpfs files
+  # -- see templates/keyvault.yaml. An instance with `enabled: false` gets
+  # no volume/mount here at all, so its vault never needs to be populated
+  # for this Connect cluster (or any other instance) to become Ready.
   template:
     pod:
       volumes:
-        - name: keyvault
+{{- range .Values.instances }}
+{{- if ne .enabled false }}
+        - name: keyvault-{{ .name }}
           csi:
             driver: secrets-store.csi.k8s.io
             readOnly: true
             volumeAttributes:
-              secretProviderClass: cdc-keyvault
+              secretProviderClass: cdc-{{ .name }}-keyvault
+{{- end }}
+{{- end }}
     connectContainer:
       volumeMounts:
-        - name: keyvault
-          mountPath: /mnt/keyvault
+{{- range .Values.instances }}
+{{- if ne .enabled false }}
+        - name: keyvault-{{ .name }}
+          mountPath: /mnt/keyvault-{{ .name }}
+{{- end }}
+{{- end }}

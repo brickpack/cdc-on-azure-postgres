@@ -45,7 +45,7 @@ output "acr_push_token_password" {
 }
 
 output "key_vault_name" {
-  description = "Existing Key Vault name -- set keyVault.name in aks/values.local.yaml."
+  description = "Existing Key Vault name -- set as the keyVault.name for any instance in aks/values.local.yaml that uses this vault."
   value       = data.azurerm_key_vault.cdc.name
 }
 
@@ -55,12 +55,12 @@ output "key_vault_uri" {
 }
 
 output "tenant_id" {
-  description = "Azure AD tenant ID -- set keyVault.tenantId in aks/values.local.yaml."
+  description = "Azure AD tenant ID -- set as the keyVault.tenantId for any instance in aks/values.local.yaml that uses this vault."
   value       = data.azurerm_client_config.current.tenant_id
 }
 
 output "keyvault_csi_client_id" {
-  description = "Key Vault CSI add-on identity clientId -- set keyVault.identityClientId in aks/values.local.yaml."
+  description = "Key Vault CSI add-on identity clientId -- set as the keyVault.identityClientId for any instance in aks/values.local.yaml that uses this vault."
   value       = azurerm_kubernetes_cluster.cdc.key_vault_secrets_provider[0].secret_identity[0].client_id
 }
 
@@ -70,12 +70,13 @@ output "cdc_node_label" {
 }
 
 output "helm_values_snippet" {
-  description = "Non-secret fields for aks/values.local.yaml produced by this stack."
+  description = "Non-secret fields for aks/values.local.yaml produced by this stack. Paste the keyVault block into each instances[] entry that uses this vault (instances can use other vaults too)."
   value       = <<-EOT
     connectImage: ${azurerm_container_registry.cdc.login_server}/cdc-kafka-connect:7.5-cdc1
-    keyVault:
-      name: ${data.azurerm_key_vault.cdc.name}
-      tenantId: ${data.azurerm_client_config.current.tenant_id}
-      identityClientId: ${azurerm_kubernetes_cluster.cdc.key_vault_secrets_provider[0].secret_identity[0].client_id}
+    # keyVault block for instances using this stack's vault:
+    #   keyVault:
+    #     name: ${data.azurerm_key_vault.cdc.name}
+    #     tenantId: ${data.azurerm_client_config.current.tenant_id}
+    #     identityClientId: ${azurerm_kubernetes_cluster.cdc.key_vault_secrets_provider[0].secret_identity[0].client_id}
   EOT
 }

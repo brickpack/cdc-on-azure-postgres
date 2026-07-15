@@ -4,9 +4,10 @@
 # Safe to run at any time -- read-only, no side effects.
 #
 # Usage (Docker):
-#   ./scripts/cdc-status.sh                          # full report
-#   ./scripts/cdc-status.sh --tables                 # topic totals only (fast)
-#   ./scripts/cdc-status.sh --tables --ops           # topic totals + INSERT/UPDATE/DELETE breakdown (slow)
+#   ./scripts/cdc-status.sh                          # full report (only instance, if just one configured)
+#   ./scripts/cdc-status.sh --instance billing       # full report for one instance (required if multiple configured)
+#   ./scripts/cdc-status.sh --instance billing --tables               # topic totals only (fast)
+#   ./scripts/cdc-status.sh --instance billing --tables --ops         # topic totals + INSERT/UPDATE/DELETE breakdown (slow)
 #
 # Usage (AKS):
 #   ./scripts/cdc-status.sh --mode aks --instance billing
@@ -56,22 +57,53 @@ fi
 # ---------------------------------------------------------------------------
 : "${CONNECT_URL:=http://localhost:8083}"
 : "${WAL_THRESHOLD_MB:=5000}"
-: "${POSTGRES_HOST:?POSTGRES_HOST is not set -- check .env}"
-: "${POSTGRES_PORT:?POSTGRES_PORT is not set}"
-: "${POSTGRES_USER:?POSTGRES_USER is not set}"
-: "${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is not set}"
-: "${POSTGRES_DBNAME:?POSTGRES_DBNAME is not set}"
-: "${SLOT_NAME:?SLOT_NAME is not set}"
 
 if [[ "$MODE" == "docker" ]]; then
-  : "${INSTANCE_NAME:?INSTANCE_NAME is not set -- check .env}"
+  INSTANCES_DIR="${ROOT_DIR}/instances"
+  if [[ -n "$INSTANCE" ]]; then
+    INSTANCE_ENV_FILE="${INSTANCES_DIR}/${INSTANCE}.env"
+    [[ -f "$INSTANCE_ENV_FILE" ]] || { echo "ERROR: ${INSTANCE_ENV_FILE} not found." >&2; exit 1; }
+  else
+    shopt -s nullglob
+    candidates=("${INSTANCES_DIR}"/*.env)
+    shopt -u nullglob
+    if [[ ${#candidates[@]} -eq 0 ]]; then
+      echo "ERROR: no instance env files found in ${INSTANCES_DIR}. Copy instances/example.env.example to instances/<name>.env, or pass --instance <name>." >&2
+      exit 1
+    elif [[ ${#candidates[@]} -gt 1 ]]; then
+      echo "ERROR: multiple instances configured -- pass --instance <name> to pick one:" >&2
+      for c in "${candidates[@]}"; do echo "  $(basename "$c" .env)" >&2; done
+      exit 1
+    fi
+    INSTANCE_ENV_FILE="${candidates[0]}"
+  fi
+
+  set -a
+  # shellcheck disable=SC1090
+  source "$INSTANCE_ENV_FILE"
+  set +a
+  : "${INSTANCE_NAME:?INSTANCE_NAME is not set in ${INSTANCE_ENV_FILE}}"
+  : "${POSTGRES_HOST:?POSTGRES_HOST is not set in ${INSTANCE_ENV_FILE}}"
+  : "${POSTGRES_PORT:?POSTGRES_PORT is not set in ${INSTANCE_ENV_FILE}}"
+  : "${POSTGRES_USER:?POSTGRES_USER is not set in ${INSTANCE_ENV_FILE}}"
+  : "${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is not set in ${INSTANCE_ENV_FILE}}"
+  : "${POSTGRES_DBNAME:?POSTGRES_DBNAME is not set in ${INSTANCE_ENV_FILE}}"
+  : "${SLOT_NAME:?SLOT_NAME is not set in ${INSTANCE_ENV_FILE}}"
+
   TOPIC_PREFIX="cdc-${INSTANCE_NAME}"
   SOURCE_CONNECTOR="postgres-source-${INSTANCE_NAME}"
   SINK_CONNECTOR="mysql-rollback-sink-${INSTANCE_NAME}"
   COMPOSE_FILE="${ROOT_DIR}/docker-compose.yml"
   NAMESPACE=""
   KAFKA_POD=""
+  INSTANCE="$INSTANCE_NAME"
 else
+  : "${POSTGRES_HOST:?POSTGRES_HOST is not set}"
+  : "${POSTGRES_PORT:?POSTGRES_PORT is not set}"
+  : "${POSTGRES_USER:?POSTGRES_USER is not set}"
+  : "${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is not set}"
+  : "${POSTGRES_DBNAME:?POSTGRES_DBNAME is not set}"
+  : "${SLOT_NAME:?SLOT_NAME is not set}"
   : "${CDC_NAMESPACE:=cdc-rollback}"
   NAMESPACE="$CDC_NAMESPACE"
   KAFKA_POD="${CDC_KAFKA_POD:-cdc-kafka-broker-0}"
@@ -345,7 +377,7 @@ show_table_stats() {
 # ===========================================================================
 # Main
 # ===========================================================================
-MODE_TAG="(docker)"
+MODE_TAG="(docker: ${INSTANCE})"
 [[ "$MODE" == "aks" ]] && MODE_TAG="(aks: ${NAMESPACE}/${INSTANCE})"
 echo -e "${BOLD}CDC Pipeline Status Report — $(date '+%Y-%m-%d %H:%M:%S %Z') ${MODE_TAG}${NC}"
 

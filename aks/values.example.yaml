@@ -1,35 +1,46 @@
 # Copy to aks/values.local.yaml and fill in real values (gitignored).
-# NO PASSWORDS GO IN THIS FILE. They live in Azure Key Vault under a fixed
-# naming convention and are resolved at runtime:
+# NO PASSWORDS GO IN THIS FILE. Each instance's two passwords live in that
+# instance's own Azure Key Vault under a fixed naming convention and are
+# resolved at runtime:
 #   cdc-<name>-postgres-password
 #   cdc-<name>-mysql-password
-# All of them (both kinds, every instance) must exist in the vault BEFORE
-# install, or the Connect pods will fail to start.
+#
+# Different instances can use entirely different vaults (different name/
+# tenant/identity in that instance's keyVault: block below). Only an
+# instance's own two secrets need to exist, in its own vault, before THAT
+# instance is enabled -- see `enabled` below.
 
 # Image built from the project Dockerfile and pushed to ACR.
 # Build and push with: aks/scripts/build-push-connect-image.sh
 connectImage: PLACEHOLDER_ACR_LOGIN_SERVER/cdc-kafka-connect:7.5-cdc1
 
-# Key Vault holding the database passwords. identityClientId is the Key
-# Vault CSI add-on identity:
+# One entry per database instance. name must match ^[a-z][a-z0-9]*$ -- it
+# becomes the Kafka topic prefix (cdc-<name>), the Postgres slot +
+# publication name (cdc_<name>), and part of the Key Vault secret names
+# (cdc-<name>-...).
+#
+# keyVault is this instance's own vault. identityClientId is the Key Vault
+# CSI add-on identity (same identity can read multiple vaults, as long as
+# it's been granted secret-get on each one):
 #   az aks show -g <rg> -n <cluster> \
 #     --query addonProfiles.azureKeyvaultSecretsProvider.identity.clientId -o tsv
-keyVault:
-  name: PLACEHOLDER_VAULT_NAME
-  tenantId: PLACEHOLDER_TENANT_ID
-  identityClientId: PLACEHOLDER_IDENTITY_CLIENT_ID
-
-# One entry per database instance (five in total).
 #
-# name must match ^[a-z][a-z0-9]*$ -- it becomes the Kafka topic prefix
-# (cdc-<name>), the Postgres slot + publication name (cdc_<name>), and part
-# of the Key Vault secret names (cdc-<name>-...).
+# enabled (default true) gates whether this instance's SecretProviderClass,
+# Connect volume mount, and source connector render at all. Add a new
+# instance with `enabled: false` while its vault is still being populated --
+# it has zero effect on the shared Connect cluster or any other instance
+# until you flip it to true.
 #
 # The mysql block is that instance's ORIGINAL source MySQL -- the rollback
 # target. Declaring it here (password excluded) means a rollback needs
 # nothing but the instance name.
 instances:
   - name: billing
+    enabled: true
+    keyVault:
+      name: PLACEHOLDER_VAULT_NAME
+      tenantId: PLACEHOLDER_TENANT_ID
+      identityClientId: PLACEHOLDER_IDENTITY_CLIENT_ID
     postgres:
       host: PLACEHOLDER.postgres.database.azure.com
       port: "5432"
@@ -40,8 +51,16 @@ instances:
       port: "3306"
       user: PLACEHOLDER_USER
       dbname: PLACEHOLDER_DBNAME
-  # - name: orders
-  #   ...
+  # - name: orders               # a second instance -- can be a different vault entirely
+  #   enabled: false             # flip true once its two secrets exist in its own vault
+  #   keyVault:
+  #     name: PLACEHOLDER2_VAULT_NAME
+  #     tenantId: PLACEHOLDER2_TENANT_ID
+  #     identityClientId: PLACEHOLDER2_IDENTITY_CLIENT_ID
+  #   postgres:
+  #     ...
+  #   mysql:
+  #     ...
 
 # EMERGENCY ONLY -- always leave this empty here. It is set at rollback time
 # by scripts/deploy-rollback-sink.sh (a list of instance names), never by

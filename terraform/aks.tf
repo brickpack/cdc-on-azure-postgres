@@ -40,13 +40,15 @@ resource "azurerm_kubernetes_cluster" "cdc" {
   # -- the existing aks/chart has no CriticalAddonsOnly toleration, and
   # Strimzi must be able to schedule here.
   default_node_pool {
-    name            = "system"
-    vm_size         = var.system_node_vm_size
-    node_count      = 1
-    vnet_subnet_id  = azurerm_subnet.aks.id
-    os_disk_type    = "Ephemeral"
-    os_disk_size_gb = 50
-    zones           = ["1", "2", "3"]
+    host_encryption_enabled      = true
+    name                         = "system"
+    vm_size                      = var.system_node_vm_size
+    node_count                   = 1
+    vnet_subnet_id               = azurerm_subnet.aks.id
+    os_disk_type                 = "Ephemeral"
+    os_disk_size_gb              = 50
+    zones                        = ["1", "2", "3"]
+    only_critical_addons_enabled = true
 
     upgrade_settings {
       max_surge = "10%"

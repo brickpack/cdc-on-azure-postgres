@@ -78,18 +78,34 @@ services:
       # Key Vault CSI. Passwords never appear in connector config payloads.
       CONNECT_CONFIG_PROVIDERS: "directory"
       CONNECT_CONFIG_PROVIDERS_DIRECTORY_CLASS: "org.apache.kafka.common.config.provider.DirectoryConfigProvider"
-      # Passed through so the entrypoint can write the password file
-      INSTANCE_NAME: "${INSTANCE_NAME}"
-      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD}"
+    volumes:
+      # One env file per database instance (instances/<name>.env). The
+      # entrypoint below reads every file here and writes a matching secret
+      # -- this is what lets one Connect worker run connectors for multiple
+      # databases/servers at once.
+      - ./instances:/instances:ro
     entrypoint:
       - /bin/bash
       - -c
       - |
-        # Write Postgres password as a file that the DirectoryConfigProvider
-        # reads at runtime -- identical layout to AKS Key Vault CSI mount.
-        # printf with no newline matches how Key Vault CSI writes secrets.
+        # Write each instance's Postgres password as a file that the
+        # DirectoryConfigProvider reads at runtime -- identical layout to the
+        # AKS Key Vault CSI mount. printf with no newline matches how Key
+        # Vault CSI writes secrets.
         mkdir -p /mnt/keyvault
-        printf '%s' "$$POSTGRES_PASSWORD" > /mnt/keyvault/cdc-$$INSTANCE_NAME-postgres-password
+        shopt -s nullglob
+        instance_files=(/instances/*.env)
+        if [ $${#instance_files[@]} -eq 0 ]; then
+          echo "ERROR: no instance env files found in /instances -- copy" >&2
+          echo "instances/example.env.example to instances/<name>.env first." >&2
+          exit 1
+        fi
+        for f in "$${instance_files[@]}"; do
+          name="$$(basename "$$f" .env)"
+          password="$$(env -i bash -c "set -a; source '$$f'; set +a; printf '%s' \"\$$POSTGRES_PASSWORD\"")"
+          printf '%s' "$$password" > "/mnt/keyvault/cdc-$${name}-postgres-password"
+          echo "Wrote secret for instance: $$name"
+        done
         exec /etc/confluent/docker/run
     tmpfs:
       - /mnt/keyvault:uid=1000,gid=1000,mode=0700

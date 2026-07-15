@@ -1,39 +1,46 @@
 #!/usr/bin/env bash
 # EMERGENCY USE ONLY.
 #
-# Points the idle JDBC sink at the original source MySQL and starts replaying
-# every change queued in Kafka since cutover. Only run this if rollback has
-# actually been decided -- see README "Rollback procedure" for the full
-# checklist (stop app writes FIRST, this script does not do that for you).
+# Points the idle JDBC sink at the original source MySQL for ONE instance and
+# starts replaying every change queued in that instance's Kafka topics since
+# cutover. Only run this if rollback has actually been decided -- see README
+# "Rollback procedure" for the full checklist (stop app writes FIRST, this
+# script does not do that for you). Other instances keep capturing changes,
+# unaffected.
 #
 # Usage:
-#   ./deploy-rollback-sink.sh <mysql_host> <mysql_port> <mysql_user> <mysql_password> <mysql_dbname> [--yes]
+#   ./deploy-rollback-sink.sh <instance_name> <mysql_host> <mysql_port> <mysql_user> <mysql_password> <mysql_dbname> [--yes]
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(dirname "$SCRIPT_DIR")"
 ENV_FILE="${ROOT_DIR}/.env"
+INSTANCES_DIR="${ROOT_DIR}/instances"
 SINK_FILE="${ROOT_DIR}/connectors/mysql-sink-standby.json"
 TRANSFORMS_FILE="${ROOT_DIR}/connectors/type-transforms.json"
-CONNECTOR_NAME="mysql-rollback-sink-connector"
 
 usage() {
-  echo "Usage: $0 <mysql_host> <mysql_port> <mysql_user> <mysql_password> <mysql_dbname> [--yes]" >&2
-  echo "  mysql_host/port/user/password/dbname: connection details for the ORIGINAL source MySQL." >&2
+  echo "Usage: $0 <instance_name> <mysql_host> <mysql_port> <mysql_user> <mysql_password> <mysql_dbname> [--yes]" >&2
+  echo "  instance_name: matches instances/<instance_name>.env" >&2
+  echo "  mysql_host/port/user/password/dbname: connection details for that instance's ORIGINAL source MySQL." >&2
   echo "  --yes: skip the interactive confirmation prompt (for use from another controlled script)." >&2
 }
 
-if [[ $# -lt 5 ]]; then
+if [[ $# -lt 6 ]]; then
   usage
   exit 1
 fi
 
-MYSQL_HOST="$1"
-MYSQL_PORT="$2"
-MYSQL_USER="$3"
-MYSQL_PASSWORD="$4"
-MYSQL_DBNAME="$5"
-AUTO_YES="${6:-}"
+INSTANCE="$1"
+MYSQL_HOST="$2"
+MYSQL_PORT="$3"
+MYSQL_USER="$4"
+MYSQL_PASSWORD="$5"
+MYSQL_DBNAME="$6"
+AUTO_YES="${7:-}"
+
+INSTANCE_ENV_FILE="${INSTANCES_DIR}/${INSTANCE}.env"
+[[ -f "$INSTANCE_ENV_FILE" ]] || { echo "ERROR: ${INSTANCE_ENV_FILE} not found." >&2; exit 1; }
 
 if [[ -f "$ENV_FILE" ]]; then
   set -a
@@ -43,9 +50,22 @@ if [[ -f "$ENV_FILE" ]]; then
 fi
 : "${CONNECT_URL:=http://localhost:8083}"
 
+set -a
+# shellcheck disable=SC1090
+source "$INSTANCE_ENV_FILE"
+set +a
+: "${INSTANCE_NAME:?INSTANCE_NAME is not set in ${INSTANCE_ENV_FILE}}"
+if [[ "$INSTANCE_NAME" != "$INSTANCE" ]]; then
+  echo "ERROR: INSTANCE_NAME (${INSTANCE_NAME}) in ${INSTANCE_ENV_FILE} must match the filename (${INSTANCE}.env)." >&2
+  exit 1
+fi
+
+CONNECTOR_NAME="mysql-rollback-sink-${INSTANCE_NAME}"
+
 echo "############################################################"
 echo "#  ROLLBACK SINK DEPLOY -- THIS WILL WRITE TO ORIGINAL MYSQL #"
 echo "############################################################"
+echo "Instance     : ${INSTANCE_NAME}"
 echo "Target MySQL : ${MYSQL_HOST}:${MYSQL_PORT}/${MYSQL_DBNAME}"
 echo "Connect URL  : ${CONNECT_URL}"
 echo
@@ -68,6 +88,7 @@ echo "    OK."
 echo "==> Writing MySQL password to Connect container secret mount ..."
 # Mirrors the layout Key Vault CSI produces in AKS. The file lives on a
 # tmpfs so it never touches the VM's disk; gone when the container stops.
+# Named per instance so multiple instances' rollback secrets can coexist.
 docker compose -f "${ROOT_DIR}/docker-compose.yml" exec -T kafka-connect \
   bash -c "printf '%s' '${MYSQL_PASSWORD}' > /mnt/keyvault/cdc-${INSTANCE_NAME}-mysql-password"
 echo "    Done."
@@ -86,9 +107,9 @@ PAYLOAD=$(jq -n \
   --arg user "$MYSQL_USER" \
   --arg inst "$INSTANCE_NAME" \
   '{name: $name, config: ($config + {
+      "topics.regex": "cdc-\($inst)\\..*",
       "connection.url": $url,
       "connection.user": $user,
-      "topics.regex": "cdc-\\($inst)\\..*",
       "connection.password": "${directory:/mnt/keyvault:cdc-\($inst)-mysql-password}"
     })}')
 
@@ -155,14 +176,14 @@ echo
 echo "############################################################"
 echo "#                     NEXT STEPS                          #"
 echo "############################################################"
-cat <<'EOF'
+cat <<EOF
 1. Confirm consumer lag is 0 (see output above). If it never reached 0,
    re-run this script's monitoring loop or check manually:
-     docker compose exec kafka kafka-consumer-groups \
-       --bootstrap-server localhost:9092 --describe --group connect-mysql-rollback-sink-connector
+     docker compose exec kafka kafka-consumer-groups \\
+       --bootstrap-server localhost:9092 --describe --group ${CONSUMER_GROUP}
 
 2. Run the row-count verification queries from README "Rollback procedure"
-   against both Postgres and the original MySQL.
+   against both Postgres and the original MySQL, for instance ${INSTANCE_NAME}.
 
 3. Spot-check critical tables for data integrity (README has sample queries).
 
@@ -170,5 +191,6 @@ cat <<'EOF'
 
 5. Verify the application is functioning against MySQL.
 
-6. Once confirmed, run ./scripts/teardown.sh to tear down this stack.
+6. Once confirmed, run ./scripts/teardown.sh ${INSTANCE_NAME} to remove this
+   instance's connectors. Other instances are unaffected.
 EOF

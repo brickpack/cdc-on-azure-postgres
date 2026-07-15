@@ -1,28 +1,32 @@
-# Mounts every instance's Postgres and MySQL password from Azure Key Vault
-# into the Connect pods (tmpfs) via the AKS Key Vault CSI add-on. Connector
-# configs reference them with ${directory:/mnt/keyvault:<objectName>}, so
-# passwords never appear in Helm values, Kubernetes Secrets, or the Connect
-# config topic.
+# One SecretProviderClass per enabled instance, each pointed at that
+# instance's own Azure Key Vault (name/tenant/identity can all differ
+# between instances -- see ../../README.md "Design decisions"). Mounted
+# into the Connect pods (tmpfs) via the AKS Key Vault CSI add-on, one mount
+# per instance (templates/kafka-connect.yaml). Connector configs reference
+# them with ${directory:/mnt/keyvault-<name>:...}, so passwords never
+# appear in Helm values, Kubernetes Secrets, or the Connect config topic.
 #
-# Key Vault secret naming convention (all must exist BEFORE install -- the
-# CSI mount fails otherwise, which doubles as day-one proof that the
-# rollback credentials are actually in the vault):
+# Key Vault secret naming convention (must exist in THIS instance's vault
+# before THIS instance is enabled -- other instances, even in different
+# vaults, are entirely unaffected):
 #   cdc-<name>-postgres-password
 #   cdc-<name>-mysql-password
+{{- range .Values.instances }}
+{{- if ne .enabled false }}
+---
 apiVersion: secrets-store.csi.x-k8s.io/v1
 kind: SecretProviderClass
 metadata:
-  name: cdc-keyvault
+  name: cdc-{{ .name }}-keyvault
 spec:
   provider: azure
   parameters:
-    keyvaultName: {{ required "keyVault.name is required -- set it in aks/values.local.yaml" .Values.keyVault.name | quote }}
-    tenantId: {{ required "keyVault.tenantId is required" .Values.keyVault.tenantId | quote }}
+    keyvaultName: {{ required (printf "instances[%s].keyVault.name is required -- set it in aks/values.local.yaml" .name) .keyVault.name | quote }}
+    tenantId: {{ required (printf "instances[%s].keyVault.tenantId is required" .name) .keyVault.tenantId | quote }}
     useVMManagedIdentity: "true"
-    userAssignedIdentityID: {{ required "keyVault.identityClientId is required (the Key Vault CSI add-on identity's clientId)" .Values.keyVault.identityClientId | quote }}
+    userAssignedIdentityID: {{ required (printf "instances[%s].keyVault.identityClientId is required (the Key Vault CSI add-on identity's clientId)" .name) .keyVault.identityClientId | quote }}
     objects: |
       array:
-{{- range .Values.instances }}
         - |
           objectName: cdc-{{ .name }}-postgres-password
           objectType: secret
@@ -30,3 +34,5 @@ spec:
           objectName: cdc-{{ .name }}-mysql-password
           objectType: secret
 {{- end }}
+{{- end }}
+

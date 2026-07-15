@@ -1,17 +1,18 @@
 {{- /*
-One Debezium source connector per instance. Per-instance topic prefix
-(cdc-<name>) is what keeps rollbacks isolated: each rollback sink consumes
-only its own instance's topics. The Docker single-instance setup uses the
-bare prefix "cdc" instead.
+One Debezium source connector per enabled instance. Per-instance topic
+prefix (cdc-<name>) is what keeps rollbacks isolated: each rollback sink
+consumes only its own instance's topics. The Docker single-instance setup
+uses the bare prefix "cdc" instead.
 
 Passwords are never templated here -- ${directory:...} placeholders are
-resolved inside the Connect workers from the Key Vault CSI mount
-(templates/keyvault.yaml).
+resolved inside the Connect workers from that instance's own Key Vault CSI
+mount (templates/keyvault.yaml, one per instance).
 */}}
 {{- range .Values.instances }}
 {{- if not (regexMatch "^[a-z][a-z0-9]*$" .name) }}
 {{- fail (printf "instance name %q must match ^[a-z][a-z0-9]*$ -- it is used in topic prefixes, Postgres slot/publication names (cdc_<name>) and Key Vault secret names (cdc-<name>-...)" .name) }}
 {{- end }}
+{{- if ne .enabled false }}
 ---
 apiVersion: kafka.strimzi.io/v1beta2
 kind: KafkaConnector
@@ -26,7 +27,7 @@ spec:
     database.hostname: {{ .postgres.host | quote }}
     database.port: {{ .postgres.port | quote }}
     database.user: {{ .postgres.user | quote }}
-    database.password: '${directory:/mnt/keyvault:cdc-{{ .name }}-postgres-password}'
+    database.password: '${directory:/mnt/keyvault-{{ .name }}:cdc-{{ .name }}-postgres-password}'
     database.dbname: {{ .postgres.dbname | quote }}
     topic.prefix: cdc-{{ .name }}
     # Fixed naming convention: create the publication as cdc_<name> on each
@@ -42,6 +43,7 @@ spec:
     heartbeat.interval.ms: "10000"
     heartbeat.action.query: 'UPDATE cdc.debezium_heartbeat SET ts = now() WHERE id = 1'
     slot.drop.on.stop: "false"
+{{- end }}
 {{- end }}
 {{- /*
 EMERGENCY ONLY: rollback sinks. .Values.rollback is a list of instance
@@ -60,6 +62,9 @@ you need one, add it here before a real rollback.
 {{- if not $inst.name }}
 {{- fail (printf "rollback entry %q does not match any instance name" $name) }}
 {{- end }}
+{{- if eq $inst.enabled false }}
+{{- fail (printf "instance %q is not enabled (instances[].enabled=false) -- its Key Vault mount doesn't exist on the Connect cluster, so it cannot be rolled back until enabled" $name) }}
+{{- end }}
 {{- $mysql := required (printf "instance %q has no mysql block in values -- the rollback target must be declared" $name) $inst.mysql }}
 ---
 apiVersion: kafka.strimzi.io/v1beta2
@@ -75,7 +80,7 @@ spec:
     topics.regex: 'cdc-{{ $name }}\..*'
     connection.url: 'jdbc:mysql://{{ $mysql.host }}:{{ $mysql.port }}/{{ $mysql.dbname }}?useSSL=true&serverTimezone=UTC'
     connection.user: {{ $mysql.user | quote }}
-    connection.password: '${directory:/mnt/keyvault:cdc-{{ $name }}-mysql-password}'
+    connection.password: '${directory:/mnt/keyvault-{{ $name }}:cdc-{{ $name }}-mysql-password}'
     insert.mode: upsert
     pk.mode: record_key
     auto.create: "false"

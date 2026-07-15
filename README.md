@@ -15,22 +15,22 @@ rollback is actually triggered.
 ```
                                    ALWAYS RUNNING
                       ┌──────────────────────────────────┐
-   Azure Postgres     │   Debezium source connector       │      Kafka topics
-  Flexible Server  ───┼─▶ (pgoutput, logical replication) ─┼──▶  cdc.<schema>.<table>
-  (post-cutover        │   continuous, since before        │   (7 days / 168h retention
-   system of record)   │   cutover)                         │    = your rollback window)
-                      └──────────────────────────────────┘                │
+   Azure Postgres     │   Debezium source connector      │      Kafka topics
+  Flexible Server  ───┼─▶ (pgoutput, logical replication)┼──▶  cdc.<schema>.<table>
+  (post-cutover       │   continuous, at cutover)        │   (7 days / 168h retention
+   system of record)  │                                  │     = your rollback window)
+                      └──────────────────────────────────┘                  │
                                                                             │ idle / not deployed
                                                                             │ during normal operation
                                                                             ▼
-                                                              ┌──────────────────────────┐
+                                                              ┌──────────────────────────-┐
                                                               │  JDBC sink connector      │
-                                                              │  (mysql-sink-standby.json) │
-                                                              │  deployed ONLY if rollback │
-                                                              │  is triggered              │
-                                                              └──────────────┬───────────┘
-                                                                              │ replay
-                                                                              ▼
+                                                              │  (mysql-sink-standby.json)│
+                                                              │  deployed ONLY if rollback│
+                                                              │  is triggered             │
+                                                              └──────────────┬───────────-┘
+                                                                             │ replay
+                                                                             ▼
                                                               Azure MySQL Flexible Server
                                                               (original source, kept idle
                                                                post-cutover)
@@ -45,6 +45,11 @@ contains everything Postgres had at the moment of rollback, and the
 application can be flipped back.
 
 ## Prerequisites
+
+Repeat this whole section once per database instance you plan to capture --
+each Postgres server needs its own replication user, publication, and
+heartbeat table, even though they all feed into the same shared Kafka +
+Kafka Connect stack.
 
 ### Postgres logical replication
 
@@ -87,13 +92,22 @@ postgres flexible-server parameter set --name wal_level --value logical`).
 Run this **before** cutover, while pg_chameleon is still the active
 replication path from MySQL to Postgres.
 
-1. Copy `.env.example` to `.env` and fill in real values (Postgres
-   connection details, slot/publication names, Kafka data directory).
-2. Bring up the stack:
+This stack supports multiple database instances (different Postgres
+servers, different original MySQL servers) behind **one** shared Kafka +
+Kafka Connect deployment -- you do not stand up a separate docker compose
+stack per database. Each instance gets its own connector, topic prefix
+(`cdc-<name>`), replication slot, and rollback target; see
+["Adding another instance"](#adding-another-instance) below.
 
-   ```bash
-   docker compose up -d --build
-   ```
+1. Copy `.env.example` to `.env` and fill in the settings shared by the
+   whole stack (Kafka data directory, cluster ID, etc -- no per-database
+   details go here).
+
+   Then, for **each** database you want to capture, copy
+   `instances/example.env.example` to `instances/<name>.env` (the filename,
+   e.g. `instances/billing.env`, becomes the instance name used throughout
+   the pipeline) and fill in that instance's Postgres connection details,
+   slot name, and publication name.
 
    **If the VM has no outbound internet access** (cannot reach Docker Hub or
    Confluent Hub at build time), build and export the images on a machine
@@ -118,9 +132,11 @@ replication path from MySQL to Postgres.
    Copy to the VM:
 
    ```bash
+   ssh <user>@<vm-ip> mkdir -p ~/migration/cdc/instances
    scp cdc-kafka-connect.tar.gz cp-kafka.tar.gz \
      docker-compose.yml .env \
      <user>@<vm-ip>:~/migration/cdc/
+   scp instances/*.env <user>@<vm-ip>:~/migration/cdc/instances/
    scp connectors/postgres-source.json connectors/mysql-sink-standby.json \
      connectors/type-transforms.json <user>@<vm-ip>:~/migration/cdc/connectors/
    scp scripts/deploy-postgres-source.sh scripts/deploy-rollback-sink.sh \
@@ -137,51 +153,86 @@ replication path from MySQL to Postgres.
    docker compose up -d
    ```
 
-3. Deploy the Postgres source connector:
+2. Deploy the Postgres source connector(s):
    ```bash
-   ./scripts/deploy-postgres-source.sh
+   ./scripts/deploy-postgres-source.sh              # every instance under instances/
+   ./scripts/deploy-postgres-source.sh billing       # just one instance (e.g. adding one later)
    ```
-   The script creates the `cdc.debezium_heartbeat` table if it is missing,
-   then submits the connector config. Debezium starts in **streaming mode
-   immediately** (no snapshot -- it captures changes from the point of
-   deploy forward).
-4. Confirm the connector reaches `RUNNING` state:
+   For each instance, the script creates the `cdc.debezium_heartbeat` table
+   if it is missing, then submits the connector config. Debezium starts in
+   **streaming mode immediately** (no snapshot -- it captures changes from
+   the point of deploy forward).
+3. Confirm every connector reaches `RUNNING` state:
    ```bash
-   ./scripts/cdc-status.sh
+   ./scripts/cdc-status.sh                       # if only one instance is configured
+   ./scripts/cdc-status.sh --instance billing    # required once more than one instance exists
    ```
-   Or quickly (substitute your `INSTANCE_NAME` value):
+   Or quickly (substitute your instance name):
    ```bash
-   curl -s http://localhost:8083/connectors/postgres-source-${INSTANCE_NAME}/status | jq .
+   curl -s http://localhost:8083/connectors/postgres-source-billing/status | jq .
    ```
 
 ## Cutover procedure
 
-1. Drop the pg_chameleon replication slot on Postgres (pg_chameleon's own
-   slot, not Debezium's -- check pg_chameleon's docs/config for its slot
-   name).
-2. Flip application connection strings from MySQL to Postgres.
-3. Confirm Debezium is capturing changes:
+Repeat this checklist independently for each instance -- cutting one
+database over does not require pausing or touching any other instance's
+pipeline.
+
+1. Drop the pg_chameleon replication slot on that instance's Postgres
+   (pg_chameleon's own slot, not Debezium's -- check pg_chameleon's
+   docs/config for its slot name).
+2. Flip that application's connection strings from MySQL to Postgres.
+3. Confirm Debezium is capturing changes (substitute the instance name,
+   e.g. `billing`):
    ```bash
-   curl -s http://localhost:8083/connectors/postgres-source-${INSTANCE_NAME}/status | jq .
+   curl -s http://localhost:8083/connectors/postgres-source-billing/status | jq .
    ```
    Make a small test write against Postgres and confirm a record appears
-   on its topic (topics are named `cdc-<INSTANCE_NAME>.<schema>.<table>`):
+   on its topic (topics are named `cdc-<name>.<schema>.<table>`):
    ```bash
    docker compose exec kafka kafka-console-consumer \
      --bootstrap-server localhost:9092 \
-     --topic cdc-${INSTANCE_NAME}.<schema>.<table> --from-beginning --max-messages 1
+     --topic cdc-billing.<schema>.<table> --from-beginning --max-messages 1
    ```
-4. **Keep the original MySQL server running and idle.** Do not stop or
-   decommission it -- it is your rollback target.
+4. **Keep that instance's original MySQL server running and idle.** Do not
+   stop or decommission it -- it is that database's rollback target.
+
+## Adding another instance
+
+Onboarding another database (a different Postgres server, a different
+original MySQL server) does not require a second Kafka/Kafka Connect stack
+and does not disrupt any instance already running:
+
+1. Run the instance's Postgres prerequisites (above) -- replication user,
+   `cdc` schema, publication, heartbeat table -- against its own server.
+2. Copy `instances/example.env.example` to `instances/<name>.env` and fill
+   in that instance's details.
+3. Deploy just that instance's source connector:
+   ```bash
+   ./scripts/deploy-postgres-source.sh <name>
+   ```
+   The Kafka Connect worker picks it up alongside every other instance's
+   connector; nothing else needs restarting.
+4. Confirm it reaches `RUNNING`:
+   ```bash
+   ./scripts/cdc-status.sh --instance <name>
+   ```
+
+To remove an instance entirely once it's no longer needed (not a rollback --
+just decommissioning), delete its connectors and drop its replication slot:
+see `./scripts/teardown.sh <name>` in "Post-rollback cleanup" below.
 
 ## Normal operation
 
 ### Comprehensive status report
 
-Run this at any time to get a full picture of pipeline health:
+Run this at any time to get a full picture of pipeline health. With only
+one instance configured under `instances/`, no flag is needed; with more
+than one, pass `--instance <name>`:
 
 ```bash
 ./scripts/cdc-status.sh
+./scripts/cdc-status.sh --instance billing
 ```
 
 Sections reported:
@@ -193,27 +244,30 @@ Sections reported:
 - **Consumer group lag** — messages pending per connector.
 - **Kafka-Connect log errors** — any `ERROR`/`Exception` lines from the
   last hour.
-- **Per-table message counts** — total messages per `cdc-<INSTANCE_NAME>.*` topic.
+- **Per-table message counts** — total messages per `cdc-<name>.*` topic.
 
 To skip the health checks and show only table counts (fast):
 
 ```bash
-./scripts/cdc-status.sh --tables
+./scripts/cdc-status.sh --instance billing --tables
 ```
 
 To also show INSERT / UPDATE / DELETE breakdown (reads every message — slow on large topics):
 
 ```bash
-./scripts/cdc-status.sh --tables --ops
+./scripts/cdc-status.sh --instance billing --tables --ops
 ```
 
 ### Automated health monitor
 
 Run this on a schedule (cron, systemd timer, etc.) -- it exits non-zero if
-anything is wrong, making it suitable for alerting:
+anything is wrong, making it suitable for alerting. With no arguments it
+checks **every** instance under `instances/`; pass `--instance <name>` to
+check just one (useful for per-instance alerting):
 
 ```bash
 ./scripts/monitor-debezium.sh
+./scripts/monitor-debezium.sh --instance billing
 ```
 
 It checks and prints a `STATUS: HEALTHY` / `STATUS: ACTION REQUIRED`
@@ -259,16 +313,20 @@ definition and re-test before proceeding with a real rollback.
 
 ## Rollback procedure
 
-Run as a checklist, in order:
+Run as a checklist, in order, **for the one instance being rolled back**.
+Other instances are unaffected -- their source connectors keep capturing
+changes the entire time.
 
-1. **Stop application writes** to Postgres (maintenance mode, scale down
-   write paths, etc -- outside the scope of this repo).
+1. **Stop application writes** to that instance's Postgres (maintenance
+   mode, scale down write paths, etc -- outside the scope of this repo).
 2. Deploy the sink:
    ```bash
-   ./scripts/deploy-rollback-sink.sh <mysql_host> <mysql_port> <mysql_user> <mysql_password> <mysql_dbname>
+   ./scripts/deploy-rollback-sink.sh <instance_name> <mysql_host> <mysql_port> <mysql_user> <mysql_password> <mysql_dbname>
    ```
-   This merges `type-transforms.json` into `mysql-sink-standby.json`, fills
-   in the connection details you passed, deploys it, and starts monitoring.
+   `instance_name` must match `instances/<instance_name>.env`. The script
+   merges `type-transforms.json` into `mysql-sink-standby.json`, fills in
+   the connection details you passed, scopes `topics.regex` to just this
+   instance's topics, deploys it, and starts monitoring.
 3. **Monitor replay progress** -- the script prints connector state and
    consumer lag every 10 seconds.
 4. **Wait for Kafka consumer lag to hit zero** before trusting the data in
@@ -292,19 +350,23 @@ Run as a checklist, in order:
    ```
 7. Flip application connection strings back to the original MySQL.
 8. Verify the application is functioning against MySQL.
-9. Run `./scripts/teardown.sh`.
+9. Run `./scripts/teardown.sh <instance_name>` to remove just this
+   instance's connectors -- Kafka and Kafka Connect keep running for any
+   other instances still being captured.
 
 ## Post-rollback cleanup
 
-- Drop the Debezium replication slot on Postgres (printed by
-  `teardown.sh`, also here for reference):
+- Drop the Debezium replication slot on that instance's Postgres (printed
+  by `teardown.sh`, also here for reference):
   ```sql
   SELECT pg_drop_replication_slot('SLOT_NAME');
   ```
-- Decommission the Azure VM once you're certain it's no longer needed.
-- Decide what to do with Postgres: since rollback means the migration was
-  abandoned, Postgres is now stale. Typical options are to keep it
-  read-only for a while for forensics, or decommission it once the
+- Decommission the Azure VM once **every** instance it hosts is no longer
+  needed -- run `./scripts/teardown.sh --all` only once nothing on the VM
+  is still required (this stops Kafka + Connect for every instance).
+- Decide what to do with that instance's Postgres: since rollback means the
+  migration was abandoned, Postgres is now stale. Typical options are to
+  keep it read-only for a while for forensics, or decommission it once the
   incident is closed out.
 
 ## When NOT to rollback
@@ -463,19 +525,22 @@ separate document) when the Docker path is retired.
 
 The `aks/` directory contains a Helm chart that deploys the same pipeline on
 Azure Kubernetes Service using Strimzi (KRaft, 3-broker cluster) and Azure
-Key Vault CSI for secrets. It supports **multiple database instances** in a
-single cluster -- each instance gets its own Debezium source connector and
-an isolated Kafka topic prefix (`cdc-<name>`).
+Key Vault CSI for secrets. Like the Docker Compose path, it supports
+**multiple database instances** behind one shared cluster -- each instance
+gets its own Debezium source connector and an isolated Kafka topic prefix
+(`cdc-<name>`). Choose AKS over Docker Compose when you need Kafka HA
+(3-broker RF=3 vs. Docker's single broker) or Key Vault-managed secrets
+instead of files on a VM.
 
 ### Architecture differences from Docker Compose
 
-|                         | Docker Compose                    | AKS (Helm)                                      |
-| ----------------------- | --------------------------------- | ----------------------------------------------- |
-| Kafka                   | ZooKeeper + single broker         | Strimzi KRaft, 3 brokers RF=3                   |
-| Secrets                 | `.env` file on the VM             | Azure Key Vault CSI                             |
-| Connectors deployed via | REST API (`scripts/`)             | `KafkaConnector` CRDs (`helm upgrade`)          |
-| Scale                   | 1 database instance               | Up to N instances (5 declared in `values.yaml`) |
-| Rollback triggered via  | `scripts/deploy-rollback-sink.sh` | `aks/scripts/deploy-rollback-sink.sh`           |
+|                         | Docker Compose                                        | AKS (Helm)                                   |
+| ----------------------- | ----------------------------------------------------- | -------------------------------------------- |
+| Kafka                   | KRaft, single broker on one VM                        | Strimzi KRaft, 3 brokers RF=3                |
+| Secrets                 | `instances/<name>.env` files on the VM                | Azure Key Vault CSI                          |
+| Connectors deployed via | REST API (`scripts/`)                                 | `KafkaConnector` CRDs (`helm upgrade`)       |
+| Scale                   | N instances, one shared single-broker Kafka on one VM | N instances, one shared 3-broker HA Kafka    |
+| Rollback triggered via  | `scripts/deploy-rollback-sink.sh <name> ...`          | `aks/scripts/deploy-rollback-sink.sh <name>` |
 
 ### Quick start
 
@@ -485,8 +550,8 @@ See [`aks/README.md`](aks/README.md) for the full prerequisite checklist
 ```bash
 # 1. Copy and fill in values
 cp aks/values.example.yaml aks/values.local.yaml
-# Edit values.local.yaml: set connectImage, keyVault.*, and one instances[]
-# entry per database. NO passwords go in this file.
+# Edit values.local.yaml: set connectImage and one instances[] entry per
+# database, each with its own keyVault block. NO passwords go in this file.
 
 # 2. Install (first time)
 helm install cdc-rollback aks/chart -n cdc-rollback \
