@@ -65,6 +65,10 @@ _TRANSIENT_DB_ERROR_PATTERNS = (
 # nearby differing chunks share a query, bridging small gaps of clean ones).
 _DRILL_MAX_CHUNKS = 5
 
+# Non-chunkable (composite / non-integer PK) tables are buffered fully in
+# memory on this host; refuse ones estimated above this instead of OOMing.
+_FALLBACK_MAX_ROWS = 20_000_000
+
 # Hash-token sentinels: CHAR(1)=NULL (distinct from empty string),
 # CHAR(2)=opaque non-NULL, CHAR(28)=multi-column PK separator,
 # CHAR(29)=column separator inside the row hash.
@@ -361,11 +365,19 @@ def _to_map_of_lists(out: str) -> dict[str, list[str]]:
     return m
 
 
-def get_mysql_tables(cfg: Config) -> set[str]:
-    return set(parse_lines(run_mysql(cfg, (
-        "SELECT TABLE_NAME FROM information_schema.TABLES "
+def get_mysql_tables(cfg: Config) -> dict[str, int]:
+    """{table: estimated_row_count} for all base tables (estimate is rough
+    but free; used only to guard the in-memory fallback path)."""
+    tables: dict[str, int] = {}
+    out = run_mysql(cfg, (
+        "SELECT TABLE_NAME, COALESCE(TABLE_ROWS, 0) FROM information_schema.TABLES "
         f"WHERE TABLE_SCHEMA={sql_literal(cfg.mysql_db)} AND TABLE_TYPE='BASE TABLE'"
-    ))))
+    ))
+    for line in parse_lines(out):
+        parts = line.split("\t")
+        if len(parts) == 2:
+            tables[parts[0]] = int(parts[1])
+    return tables
 
 
 def get_pg_tables(cfg: Config) -> set[str]:
@@ -854,7 +866,7 @@ def main() -> int:
     try:
         mysql_tables, pg_tables = _run_pair(lambda: get_mysql_tables(cfg),
                                             lambda: get_pg_tables(cfg))
-        both = sorted((mysql_tables & pg_tables) - EXCLUDED_TABLES)
+        both = sorted((set(mysql_tables) & pg_tables) - EXCLUDED_TABLES)
         if cfg.selected_tables is not None:
             both = [t for t in both if t in cfg.selected_tables]
         if not both:
@@ -888,9 +900,15 @@ def main() -> int:
             skip_rows.append((table, "SKIP-COL"))
         else:
             types = mysql_types.get(table, {})
-            metas.append(TableMeta(table, mysql_pk,
-                                   {c: types.get(c, "") for c in mysql_pk},
-                                   common_cols, pg_udt))
+            tm = TableMeta(table, mysql_pk, {c: types.get(c, "") for c in mysql_pk},
+                           common_cols, pg_udt)
+            if not _chunkable(tm) and mysql_tables.get(table, 0) > _FALLBACK_MAX_ROWS:
+                skipped.append(
+                    f"{table}: PK is not a single native integer on both sides, and "
+                    f"~{mysql_tables[table]:,} rows is too large to buffer in memory")
+                skip_rows.append((table, "SKIP-BIG"))
+            else:
+                metas.append(tm)
 
     # Snapshot bounds for all chunkable tables in one query, one lag pause.
     max_pks: dict[str, str] = {}
@@ -939,7 +957,7 @@ def main() -> int:
             ch_str = str(ch) if ch >= 0 else "ERROR"
             print_and_write([f"  {tname:40} {mo:12d} {po:12d} {ch_str:>12}"], report)
     if skipped:
-        print_and_write(["", f"Skipped ({len(skipped)} — no common PK or columns):"], report)
+        print_and_write(["", f"Skipped ({len(skipped)}):"], report)
         print_and_write([f"  {s}" for s in skipped], report)
     if cfg.inspect_limit == 0 and failures:
         print_and_write(["", "Tip: re-run with  --inspect 5  to see per-column diffs."], report)
