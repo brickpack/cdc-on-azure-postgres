@@ -1,0 +1,20 @@
+FROM python:3.11-slim
+
+# Pin mysql-replication<1.0 — v1.0+ requires binlog_row_metadata=FULL
+# which Azure MySQL Flexible Server does not expose as a configurable parameter.
+# v0.45 and earlier query information_schema for column names instead.
+RUN pip install --no-cache-dir 'mysql-replication>=0.30,<1.0' \
+    && pip install --no-cache-dir pg_chameleon PyYAML
+
+COPY patch-pg-chameleon.py /tmp/patch.py
+RUN LIB_DIR="$(python3 -c "import pg_chameleon, pathlib; print(pathlib.Path(pg_chameleon.__file__).parent / 'lib')")" \
+    && python3 /tmp/patch.py "$LIB_DIR" \
+    && python3 -c "import pg_chameleon" \
+    && rm /tmp/patch.py
+
+ENV HOME=/chameleon
+RUN mkdir -p /chameleon/.pg_chameleon/configuration /data
+VOLUME ["/chameleon/.pg_chameleon", "/data"]
+
+ENTRYPOINT ["chameleon"]
+CMD ["--help"]

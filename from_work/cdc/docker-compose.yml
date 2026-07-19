@@ -1,0 +1,152 @@
+services:
+  kafka:
+    image: confluentinc/cp-kafka:7.5.0
+    container_name: cdc-kafka
+    restart: unless-stopped
+    environment:
+      # KRaft mode -- no ZooKeeper. Single combined broker+controller node.
+      # CLUSTER_ID must be stable across restarts; generate once with:
+      #   docker run --rm confluentinc/cp-kafka:7.5.0 kafka-storage random-uuid
+      # then set KAFKA_CLUSTER_ID in .env. If the data dir already exists with
+      # a different ID, delete it first (docker compose down -v).
+      KAFKA_NODE_ID: "1"
+      KAFKA_PROCESS_ROLES: "broker,controller"
+      KAFKA_CONTROLLER_QUORUM_VOTERS: "1@kafka:9093"
+      KAFKA_LISTENERS: "PLAINTEXT://0.0.0.0:9092,CONTROLLER://kafka:9093"
+      KAFKA_ADVERTISED_LISTENERS: "PLAINTEXT://kafka:9092"
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: "PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT"
+      KAFKA_INTER_BROKER_LISTENER_NAME: "PLAINTEXT"
+      KAFKA_CONTROLLER_LISTENER_NAMES: "CONTROLLER"
+      CLUSTER_ID: "${KAFKA_CLUSTER_ID}"
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: "1"
+      # 168 hours = 7 days. This is the rollback window: any Postgres change
+      # older than this has been deleted from the log and can no longer be
+      # replayed into MySQL. See README "When NOT to rollback".
+      KAFKA_LOG_RETENTION_HOURS: "168"
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+    ports:
+      - "9092:9092"
+    volumes:
+      - ${KAFKA_DATA_DIR:-/kafka-data}/kafka:/var/lib/kafka/data
+    networks:
+      - cdc-net
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "kafka-broker-api-versions --bootstrap-server localhost:9092 > /dev/null 2>&1",
+        ]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "3"
+
+  kafka-connect:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: cdc-kafka-connect:latest
+    container_name: cdc-kafka-connect
+    restart: unless-stopped
+    depends_on:
+      kafka:
+        condition: service_healthy
+    environment:
+      CONNECT_BOOTSTRAP_SERVERS: "kafka:9092"
+      CONNECT_REST_PORT: "8083"
+      CONNECT_GROUP_ID: "cdc-rollback-connect-cluster"
+      CONNECT_CONFIG_STORAGE_TOPIC: "cdc-connect-configs"
+      CONNECT_OFFSET_STORAGE_TOPIC: "cdc-connect-offsets"
+      CONNECT_STATUS_STORAGE_TOPIC: "cdc-connect-status"
+      CONNECT_CONFIG_STORAGE_REPLICATION_FACTOR: "1"
+      CONNECT_OFFSET_STORAGE_REPLICATION_FACTOR: "1"
+      CONNECT_STATUS_STORAGE_REPLICATION_FACTOR: "1"
+      CONNECT_KEY_CONVERTER: "org.apache.kafka.connect.json.JsonConverter"
+      CONNECT_VALUE_CONVERTER: "org.apache.kafka.connect.json.JsonConverter"
+      CONNECT_KEY_CONVERTER_SCHEMAS_ENABLE: "true"
+      CONNECT_VALUE_CONVERTER_SCHEMAS_ENABLE: "true"
+      CONNECT_REST_ADVERTISED_HOST_NAME: "${CONNECT_REST_ADVERTISED_HOST_NAME:-kafka-connect}"
+      CONNECT_PLUGIN_PATH: "/usr/share/java,/usr/share/confluent-hub-components"
+      CONNECT_LOG4J_ROOT_LOGLEVEL: "INFO"
+      # DirectoryConfigProvider resolves ${directory:/mnt/keyvault:<name>}
+      # placeholders in connector configs at runtime -- same mechanism as AKS
+      # Key Vault CSI. Passwords never appear in connector config payloads.
+      CONNECT_CONFIG_PROVIDERS: "directory"
+      CONNECT_CONFIG_PROVIDERS_DIRECTORY_CLASS: "org.apache.kafka.common.config.provider.DirectoryConfigProvider"
+    volumes:
+      # One env file per database instance (instances/<name>.env). The
+      # entrypoint below reads every file here and writes a matching secret
+      # -- this is what lets one Connect worker run connectors for multiple
+      # databases/servers at once.
+      - ./instances:/instances:ro
+    entrypoint:
+      - /bin/bash
+      - -c
+      - |
+        # Write each instance's Postgres password as a file that the
+        # DirectoryConfigProvider reads at runtime -- identical layout to the
+        # AKS Key Vault CSI mount. printf with no newline matches how Key
+        # Vault CSI writes secrets.
+        mkdir -p /mnt/keyvault
+        shopt -s nullglob
+        instance_files=(/instances/*.env)
+        if [ $${#instance_files[@]} -eq 0 ]; then
+          echo "ERROR: no instance env files found in /instances -- copy" >&2
+          echo "instances/example.env.example to instances/<name>.env first." >&2
+          exit 1
+        fi
+        for f in "$${instance_files[@]}"; do
+          name="$$(basename "$$f" .env)"
+          password="$$(env -i bash -c "set -a; source '$$f'; set +a; printf '%s' \"\$$POSTGRES_PASSWORD\"")"
+          printf '%s' "$$password" > "/mnt/keyvault/cdc-$${name}-postgres-password"
+          echo "Wrote secret for instance: $$name"
+        done
+        exec /etc/confluent/docker/run
+    tmpfs:
+      - /mnt/keyvault:uid=1000,gid=1000,mode=0700
+    ports:
+      - "8083:8083"
+    networks:
+      - cdc-net
+    healthcheck:
+      test:
+        ["CMD-SHELL", "curl -fs http://localhost:8083/connectors > /dev/null"]
+      interval: 10s
+      timeout: 10s
+      retries: 15
+      start_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "3"
+
+  kafbat-ui:
+    image: ghcr.io/kafbat/kafka-ui:latest
+    container_name: cdc-kafbat-ui
+    restart: unless-stopped
+    depends_on:
+      kafka:
+        condition: service_healthy
+    environment:
+      KAFKA_CLUSTERS_0_NAME: "cdc-local"
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: "kafka:9092"
+      DYNAMIC_CONFIG_ENABLED: "true"
+    ports:
+      - "8080:8080"
+    networks:
+      - cdc-net
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "3"
+
+networks:
+  cdc-net:
+    driver: bridge

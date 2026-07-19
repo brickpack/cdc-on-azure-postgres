@@ -1,0 +1,65 @@
+apiVersion: kafka.strimzi.io/v1beta2
+kind: KafkaConnect
+metadata:
+  name: cdc-connect
+  annotations:
+    # Lets Strimzi manage connectors declaratively from the KafkaConnector
+    # resources in connectors.yaml instead of REST API calls.
+    strimzi.io/use-connector-resources: "true"
+spec:
+  replicas: 2
+  # Image built from the project Dockerfile and pushed to ACR.
+  # Run aks/scripts/build-push-connect-image.sh before first deploy or
+  # whenever the Dockerfile changes.
+  image: {{ required "connectImage is required -- set it in aks/values.local.yaml" .Values.connectImage }}
+  bootstrapServers: cdc-kafka-kafka-bootstrap:9092
+  config:
+    # Same Connect cluster identity/settings as docker-compose.yml, with
+    # internal-topic replication raised from 1 to 3.
+    group.id: cdc-rollback-connect-cluster
+    config.storage.topic: cdc-connect-configs
+    offset.storage.topic: cdc-connect-offsets
+    status.storage.topic: cdc-connect-status
+    config.storage.replication.factor: 3
+    offset.storage.replication.factor: 3
+    status.storage.replication.factor: 3
+    key.converter: org.apache.kafka.connect.json.JsonConverter
+    value.converter: org.apache.kafka.connect.json.JsonConverter
+    key.converter.schemas.enable: "true"
+    value.converter.schemas.enable: "true"
+    # Resolves ${directory:/mnt/keyvault-<name>:<file>} placeholders in
+    # connector configs from each enabled instance's Key Vault CSI mount at
+    # runtime, so passwords never enter the Connect config topic.
+    config.providers: directory
+    config.providers.directory.class: org.apache.kafka.common.config.provider.DirectoryConfigProvider
+  resources:
+    requests:
+      cpu: "1"
+      memory: 2Gi
+    limits:
+      memory: 2Gi
+  # One Key Vault mount per enabled instance, each read-only as tmpfs files
+  # -- see templates/keyvault.yaml. An instance with `enabled: false` gets
+  # no volume/mount here at all, so its vault never needs to be populated
+  # for this Connect cluster (or any other instance) to become Ready.
+  template:
+    pod:
+      volumes:
+{{- range .Values.instances }}
+{{- if ne .enabled false }}
+        - name: keyvault-{{ .name }}
+          csi:
+            driver: secrets-store.csi.k8s.io
+            readOnly: true
+            volumeAttributes:
+              secretProviderClass: cdc-{{ .name }}-keyvault
+{{- end }}
+{{- end }}
+    connectContainer:
+      volumeMounts:
+{{- range .Values.instances }}
+{{- if ne .enabled false }}
+        - name: keyvault-{{ .name }}
+          mountPath: /mnt/keyvault-{{ .name }}
+{{- end }}
+{{- end }}

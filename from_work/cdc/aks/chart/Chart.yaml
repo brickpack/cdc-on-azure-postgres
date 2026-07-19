@@ -1,0 +1,8 @@
+apiVersion: v2
+name: cdc-rollback
+description: >-
+  Postgres -> Kafka CDC rollback pipeline (Strimzi) for five database
+  instances on AKS. AKS equivalent of the repo's Docker Compose stack,
+  which remains the single-VM deployment path.
+type: application
+version: 0.1.0

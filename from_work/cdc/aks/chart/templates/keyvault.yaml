@@ -1,0 +1,38 @@
+# One SecretProviderClass per enabled instance, each pointed at that
+# instance's own Azure Key Vault (name/tenant/identity can all differ
+# between instances -- see ../../README.md "Design decisions"). Mounted
+# into the Connect pods (tmpfs) via the AKS Key Vault CSI add-on, one mount
+# per instance (templates/kafka-connect.yaml). Connector configs reference
+# them with ${directory:/mnt/keyvault-<name>:...}, so passwords never
+# appear in Helm values, Kubernetes Secrets, or the Connect config topic.
+#
+# Key Vault secret naming convention (must exist in THIS instance's vault
+# before THIS instance is enabled -- other instances, even in different
+# vaults, are entirely unaffected):
+#   cdc-<name>-postgres-password
+#   cdc-<name>-mysql-password
+{{- range .Values.instances }}
+{{- if ne .enabled false }}
+---
+apiVersion: secrets-store.csi.x-k8s.io/v1
+kind: SecretProviderClass
+metadata:
+  name: cdc-{{ .name }}-keyvault
+spec:
+  provider: azure
+  parameters:
+    keyvaultName: {{ required (printf "instances[%s].keyVault.name is required -- set it in aks/values.local.yaml" .name) .keyVault.name | quote }}
+    tenantId: {{ required (printf "instances[%s].keyVault.tenantId is required" .name) .keyVault.tenantId | quote }}
+    useVMManagedIdentity: "true"
+    userAssignedIdentityID: {{ required (printf "instances[%s].keyVault.identityClientId is required (the Key Vault CSI add-on identity's clientId)" .name) .keyVault.identityClientId | quote }}
+    objects: |
+      array:
+        - |
+          objectName: cdc-{{ .name }}-postgres-password
+          objectType: secret
+        - |
+          objectName: cdc-{{ .name }}-mysql-password
+          objectType: secret
+{{- end }}
+{{- end }}
+
