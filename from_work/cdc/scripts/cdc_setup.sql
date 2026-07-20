@@ -8,7 +8,7 @@ SELECT * FROM pg_replication_slots;
 SELECT * FROM pg_publication_tables;
 SHOW max_wal_senders;
 
-REASSIGN OWNED BY cdc_replication TO psqladmin;
+REASSIGN OWNED BY cdc_replication TO pgadmin;
 DROP OWNED BY cdc_replication;
 DROP ROLE cdc_replication;
 
@@ -41,12 +41,29 @@ CREATE SCHEMA IF NOT EXISTS cdc;
 
 GRANT USAGE, CREATE ON SCHEMA cdc TO cdc_replication;
 
--- Step 5. Capture every table, present and future
-CREATE PUBLICATION <DB_NAME>_cdc_publication FOR ALL TABLES;
+-- Step 5. Publish only app data + the CDC heartbeat schema.
+-- Do NOT use FOR ALL TABLES: that includes sch_chameleon (pg_chameleon
+-- replica metadata), which must stay out of the Debezium publication.
+-- FOR TABLES IN SCHEMA requires PostgreSQL 15+. On PG 14, list tables
+-- explicitly (public.* + cdc.debezium_heartbeat).
+--
+-- NAME MUST MATCH THE CONNECTOR. AKS Helm defaults both publication and
+-- slot to cdc_<instances[].name> (e.g. instance toolbox → cdc_toolbox).
+-- The older <DB_NAME>_cdc_publication / <DB_NAME>_cdc_slot pattern only
+-- works if you also set postgres.publicationName / postgres.slotName in
+-- aks/values.local.yaml (or SLOT_NAME / PUBLICATION_NAME in Docker .env).
+-- Example for AKS default (instance name toolbox):
+--   CREATE PUBLICATION cdc_toolbox FOR TABLES IN SCHEMA public, cdc;
+CREATE PUBLICATION cdc_<DB_NAME> FOR TABLES IN SCHEMA public, cdc;
 
--- Step 6. Create the logical replication slot Debezium will use for this
--- database. Set SLOT_NAME in instances/<name>.env to this same value.
-SELECT * FROM pg_create_logical_replication_slot('<DB_NAME>_cdc_slot', 'pgoutput');
+-- Step 6. Replication slot — OPTIONAL to create by hand.
+-- Debezium creates the slot named in slot.name on first start if missing.
+-- If you pre-create it, use the SAME name the connector will use
+-- (AKS default: cdc_<instances[].name>), or you get an orphan slot that
+-- retains WAL until dropped (that is why shop_cdc_slot had to go when the
+-- connector came up as cdc_toolbox).
+-- SELECT pg_create_logical_replication_slot('cdc_toolbox', 'pgoutput');
+SELECT * FROM pg_create_logical_replication_slot('cdc_<DB_NAME>', 'pgoutput');
 
 -- Step 7. Heartbeat table -- required for WAL LSN advancement when no other
 -- DML hits a published table (see "Heartbeat" in Troubleshooting)
@@ -91,46 +108,3 @@ SHOW VARIABLES LIKE 'binlog_format';
 -- 2. Check `binlog_row_image`:
 SHOW VARIABLES LIKE 'binlog_row_image';
 -- Expected: `FULL`
-
-
-
-
--- Check slot state first
-SELECT slot_name, active, active_pid
-FROM pg_replication_slots
-WHERE slot_name = 'debezium';
-
--- If active, stop connector first, then terminate backend if still attached
-SELECT pg_terminate_backend(active_pid)
-FROM pg_replication_slots
-WHERE slot_name = 'debezium'
-  AND active_pid IS NOT NULL;
-
--- Drop slot
-SELECT pg_drop_replication_slot('debezium');
-
-SELECT pg_drop_replication_slot('debezium');
-SELECT current_user;
-SELECT rolname, rolreplication
-FROM pg_roles
-WHERE rolname = current_user;
-ALTER ROLE psqladmin WITH REPLICATION;
-
-ALTER PUBLICATION <DB_NAME>_cdc_publication OWNER TO cdc_replication;
-
-DROP PUBLICATION <DB_NAME>_cdc_publication;
-CREATE PUBLICATION <DB_NAME>_cdc_publication FOR ALL TABLES;
-
--- Total rows processed (all batches, all sources)
-SELECT SUM(i_replayed) AS total_rows_replayed,
-       SUM(i_skipped) AS total_rows_skipped,
-       SUM(i_ddl) AS total_ddl_operations
-FROM sch_chameleon.t_replica_batch;
-
-
--- Pending batches (not yet replayed)
-SELECT COUNT(*) AS pending_batches,
-       SUM(i_replayed + i_skipped) AS pending_rows
-FROM sch_chameleon.t_replica_batch
-WHERE NOT b_replayed;
-
