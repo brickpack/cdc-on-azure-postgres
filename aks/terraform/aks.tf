@@ -40,7 +40,9 @@ resource "azurerm_kubernetes_cluster" "cdc" {
   # -- the existing aks/chart has no CriticalAddonsOnly toleration, and
   # Strimzi must be able to schedule here.
   default_node_pool {
-    host_encryption_enabled      = true
+    # Requires Microsoft.Compute/EncryptionAtHost on the subscription.
+    # Leave false until: az feature register --namespace Microsoft.Compute --name EncryptionAtHost
+    host_encryption_enabled      = false
     name                         = "system"
     vm_size                      = var.system_node_vm_size
     node_count                   = 1
@@ -75,7 +77,9 @@ resource "azurerm_kubernetes_cluster_node_pool" "cdc" {
   node_count            = var.cdc_node_count
   vnet_subnet_id        = azurerm_subnet.aks.id
   mode                  = "User"
-  # D2ds_v4 temp disk is 75 GiB -- ephemeral OS must fit under that.
+  # Required to change vm_size (and other ForceNew-ish props) in-place.
+  temporary_name_for_rotation = "cdctmp"
+  # D2ds_v4 temp disk is 75 GiB; D4ds_v4 is 150 GiB -- ephemeral OS must fit.
   os_disk_type    = "Ephemeral"
   os_disk_size_gb = 64
   zones           = ["1", "2", "3"]

@@ -4,11 +4,11 @@ resource "azurerm_container_registry" "cdc" {
   name                          = local.acr_name
   resource_group_name           = azurerm_resource_group.cdc.name
   location                      = azurerm_resource_group.cdc.location
-  sku                           = "Standard"
-  admin_enabled                 = false
-  quarantine_policy_enabled     = true
-  public_network_access_enabled = false
-  tags                          = var.tags
+  sku           = "Standard"
+  admin_enabled = false
+  # Public access required on Standard; disabling it is Premium-only.
+  # Auth still required for push/pull (kubelet identity + scoped token).
+  tags = var.tags
 }
 
 # Token used by Strimzi's KafkaConnect build to push the Connect image.
