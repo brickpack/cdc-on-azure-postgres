@@ -1,0 +1,51 @@
+# Kafbat UI for topic inspection, same as the docker-compose.yml service.
+# ClusterIP only -- reach it with:
+#   kubectl port-forward -n <namespace> svc/cdc-kafbat-ui 8080:8080
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cdc-kafbat-ui
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: cdc-kafbat-ui
+  template:
+    metadata:
+      labels:
+        app: cdc-kafbat-ui
+    spec:
+      containers:
+        - name: kafbat-ui
+          image: ghcr.io/kafbat/kafka-ui:latest
+          env:
+            - name: KAFKA_CLUSTERS_0_NAME
+              value: cdc-kafka
+            - name: KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS
+              value: cdc-kafka-kafka-bootstrap:9092
+            - name: KAFKA_CLUSTERS_0_KAFKACONNECT_0_NAME
+              value: cdc-connect
+            - name: KAFKA_CLUSTERS_0_KAFKACONNECT_0_ADDRESS
+              value: http://cdc-connect-connect-api:8083
+            - name: DYNAMIC_CONFIG_ENABLED
+              value: "true"
+          ports:
+            - containerPort: 8080
+          resources:
+            requests:
+              cpu: 100m
+              memory: 512Mi
+            limits:
+              memory: 1Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: cdc-kafbat-ui
+spec:
+  type: ClusterIP
+  selector:
+    app: cdc-kafbat-ui
+  ports:
+    - port: 8080
+      targetPort: 8080
