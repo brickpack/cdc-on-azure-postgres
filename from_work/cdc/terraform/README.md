@@ -103,7 +103,7 @@ chart install steps are in [`aks/README.md`](../aks/README.md).
 
 ---
 
-## 7. VNet peering + private DNS
+## 2. VNet peering + private DNS
 
 Postgres/MySQL Flexible Servers with private access resolve via private DNS
 zones linked only to the DB VNet. AKS needs:
@@ -112,7 +112,7 @@ zones linked only to the DB VNet. AKS needs:
    `10.240.0.0/16`; many DB VNets use `10.0.0.0/16`).
 2. **Private DNS zone links** from each DB private zone onto the AKS VNet.
 
-### 7a. Local half (Terraform)
+### 2a. Local half (Terraform)
 
 Set in `terraform.tfvars` and apply (can be part of step 1):
 
@@ -122,7 +122,7 @@ peer_vnet_ids = [
 ]
 ```
 
-### 7b. Remote half + DNS links (Azure CLI on the DB side)
+### 2b. Remote half + DNS links (Azure CLI on the DB side)
 
 ```bash
 AKS_VNET="$(cd ../terraform && terraform output -raw vnet_id)"
