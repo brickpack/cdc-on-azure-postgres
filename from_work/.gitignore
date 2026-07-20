@@ -160,6 +160,7 @@ cdc/terraform/override.tf
 cdc/terraform/override.tf.json
 cdc/terraform/*_override.tf
 cdc/terraform/*_override.tf.json
+cdc/terraform/.terraform.lock.hcl
 
 # AKS Helm values -- real hosts, tenant/CSI IDs (passwords stay in Key Vault).
 # Keep cdc/aks/values.example.yaml tracked.
