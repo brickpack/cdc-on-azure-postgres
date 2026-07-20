@@ -105,8 +105,10 @@ postgres flexible-server parameter set --name wal_level --value logical`).
    CREATE SCHEMA IF NOT EXISTS cdc;
    GRANT USAGE, CREATE ON SCHEMA cdc TO cdc_replication;
 
-   -- Capture every table, present and future
-   CREATE PUBLICATION <DB_NAME>_cdc_publication FOR ALL TABLES;
+   -- App tables + heartbeat only. Do NOT use FOR ALL TABLES -- that would
+   -- include sch_chameleon (pg_chameleon replica metadata). PG 15+; on PG 14
+   -- list public.* + cdc.debezium_heartbeat explicitly instead.
+   CREATE PUBLICATION <DB_NAME>_cdc_publication FOR TABLES IN SCHEMA public, cdc;
 
     -- Create the logical replication slot Debezium will use for this database
     -- (set SLOT_NAME in instances/<name>.env to this same value)
@@ -647,83 +649,15 @@ after a fresh deploy, confirm you have the latest `docker-compose.yml`.
 
 ---
 
-# <!--
-
-AKS DEPLOYMENT
-This section is self-contained and can be moved to aks/README.md (or a
-separate document) when the Docker path is retired.
-================================================================================
--->
-
 ## AKS deployment
 
-The `aks/` directory contains a Helm chart that deploys the same pipeline on
-Azure Kubernetes Service using Strimzi (KRaft, 3-broker cluster) and Azure
-Key Vault CSI for secrets. Like the Docker Compose path, it supports
-**multiple database instances** behind one shared cluster -- each instance
-gets its own Debezium source connector and an isolated Kafka topic prefix
-(`cdc-<name>`). Choose AKS over Docker Compose when you need Kafka HA
-(3-broker RF=3 vs. Docker's single broker) or Key Vault-managed secrets
-instead of files on a VM.
+The [`aks/`](aks/) directory runs this same pipeline on Azure Kubernetes
+Service -- Strimzi-managed Kafka (3 brokers, RF=3) and Azure Key Vault CSI
+for secrets, with the same per-instance model. Choose it over Docker
+Compose when you need Kafka HA or Key Vault-managed secrets instead of
+files on a VM.
 
-### Architecture differences from Docker Compose
-
-|                         | Docker Compose                                        | AKS (Helm)                                   |
-| ----------------------- | ----------------------------------------------------- | -------------------------------------------- |
-| Kafka                   | KRaft, single broker on one VM                        | Strimzi KRaft, 3 brokers RF=3                |
-| Secrets                 | `instances/<name>.env` files on the VM                | Azure Key Vault CSI                          |
-| Connectors deployed via | REST API (`scripts/`)                                 | `KafkaConnector` CRDs (`helm upgrade`)       |
-| Scale                   | N instances, one shared single-broker Kafka on one VM | N instances, one shared 3-broker HA Kafka    |
-| Rollback triggered via  | `scripts/deploy-rollback-sink.sh <name> ...`          | `aks/scripts/deploy-rollback-sink.sh <name>` |
-
-### Quick start
-
-See [`aks/README.md`](aks/README.md) for the full prerequisite checklist
-(Strimzi operator, ACR, Key Vault secrets). The short version:
-
-```bash
-# 1. Copy and fill in values
-cp aks/values.example.yaml aks/values.local.yaml
-# Edit values.local.yaml: set connectImage and one instances[] entry per
-# database, each with its own keyVault block. NO passwords go in this file.
-
-# 2. Install (first time)
-helm install cdc-rollback aks/chart -n cdc-rollback \
-  -f aks/values.local.yaml
-
-# 3. Upgrade after config changes
-helm upgrade cdc-rollback aks/chart -n cdc-rollback \
-  -f aks/values.local.yaml
-```
-
-### One-time Postgres prerequisites (per instance)
-
-See [Postgres logical replication](#postgres-logical-replication) in this file.
-
-### Monitoring (AKS mode)
-
-`scripts/cdc-status.sh` supports AKS via `--mode aks`. The Kafka Connect
-REST API must be reachable -- use a port-forward if it is not on a
-LoadBalancer:
-
-```bash
-kubectl port-forward -n cdc-rollback svc/cdc-connect-connect-api 8083:8083 &
-
-CONNECT_URL=http://localhost:8083 \
-POSTGRES_HOST=<host> POSTGRES_PORT=5432 \
-POSTGRES_USER=<user> POSTGRES_PASSWORD=<pass> POSTGRES_DBNAME=<db> \
-SLOT_NAME=cdc_toolbox \
-  ./scripts/cdc-status.sh --mode aks --instance toolbox
-```
-
-### Triggering a rollback (AKS)
-
-```bash
-# Reads MySQL target from the deployed Helm values; password from Key Vault
-aks/scripts/deploy-rollback-sink.sh toolbox
-```
-
-### Rollback window
-
-Same 7-day / 168-hour rule as Docker. Configured in `aks/chart/values.yaml`
-(`kafka.retentionHours`).
+See [`aks/README.md`](aks/README.md) for everything AKS-specific:
+architecture differences, prerequisites, install, monitoring, and the
+rollback procedure. The architecture, rollback window, type-transform
+validation, and rollback checklist in this README apply unchanged.

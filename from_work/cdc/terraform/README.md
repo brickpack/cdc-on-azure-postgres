@@ -1,9 +1,21 @@
-# AKS Terraform (standalone)
+# AKS Terraform (infra only)
 
-Provisions a **greenfield** Azure stack for the CDC rollback pipeline in
-[`aks/`](../aks/). It has no dependency on any existing Azure resources or on
-the Docker Compose path -- apply this, then follow [`aks/README.md`](../aks/README.md)
-to install Strimzi + the Helm chart.
+Provisions the Azure foundation for the CDC rollback pipeline in
+[`aks/`](../aks/): resource group, VNet, ACR, AKS (with Key Vault CSI), and
+the CSI identity’s `Key Vault Secrets User` role on an **existing** vault.
+
+**This file stops at infrastructure.** After apply (and peering), continue
+the deploy runbook in [`aks/README.md`](../aks/README.md) — kubeconfig,
+values, Key Vault secrets, Connect image, Postgres prep, Strimzi, Helm,
+verify, and day-2 ops.
+
+```text
+A. HERE     terraform apply + VNet peering / private DNS
+B. aks/     everything else (see aks/README.md “Install”)
+```
+
+Teardown: uninstall Helm / delete broker PVCs **before** `terraform destroy`
+(see Destroy below and aks README full teardown).
 
 ## What it creates
 
@@ -11,34 +23,37 @@ to install Strimzi + the Helm chart.
 | --- | --- |
 | Resource group | All of the below live here |
 | VNet + AKS subnet | Azure CNI Overlay (small subnet, cheap) |
-| Optional VNet peerings | Local half only -- see `peer_vnet_ids` |
-| ACR (Basic) | Holds the Strimzi-built Connect image; push token for the chart |
+| Optional VNet peerings | Local half only — see `peer_vnet_ids` |
+| ACR (Standard) | Holds the Connect image; scoped push token |
 | AKS (Free tier) | Key Vault CSI add-on; API locked to your CIDRs |
-| System node pool | 1× `Standard_D2ds_v4` (kube-system, Strimzi operator) |
+| System node pool | 1× `Standard_D2ds_v4` (CriticalAddonsOnly) |
 | CDC node pool | 3× `Standard_D2ds_v4`, labeled `workload=cdc-rollback` |
 | Role assignment | `Key Vault Secrets User` on an **existing** vault for the CSI identity |
 
 Does **not** create a Key Vault. Point `key_vault_name` /
-`key_vault_resource_group_name` at the vault that already holds the DB
-passwords (e.g. `dbmig-dev-kv` in `dbmig-dev-rg`). Secret names must still
-match the chart convention: `cdc-<name>-postgres-password` /
-`cdc-<name>-mysql-password`.
+`key_vault_resource_group_name` at the vault that holds (or will hold) DB
+passwords. How secret names are chosen and how to create missing ones is
+documented in [`aks/README.md`](../aks/README.md) (Key Vault section).
 
-Sized for Kafka RF=3 (three CDC nodes). Prefer `Standard_D4ds_v4` for the
-CDC pool once family quota allows (>= 14 vCPU).
+The Helm chart is sized for **3× D2ds_v4** (broker `500m`/`2500Mi`, Connect
+1 replica). Prefer `Standard_D4ds_v4` for the CDC pool once **Total Regional
+vCPUs** and **Standard DDSv4 Family vCPUs** in the region are ≥ ~20.
+
+```bash
+az vm list-usage -l westus2 -o table | grep -iE 'Ddsv4|Total Regional vCPUs'
+```
 
 ## Cost floor (intentional)
 
 - AKS **Free** tier (no Uptime SLA)
 - **No** Azure Monitor / OMS agent
-- ACR **Basic**
-- `*_ds_v4` VMs + **ephemeral** OS disks (fits common ~10 vCPU/family quotas)
-- Public API server (restricted by IP) instead of a private cluster + jump box
-- Reuses an existing Key Vault (no second vault to pay for / manage)
+- ACR **Standard**
+- `*_ds_v4` VMs + **ephemeral** OS disks
+- Public API server (CIDR-restricted), not a private cluster + jump box
+- Reuses an existing Key Vault
 
-Rough order of magnitude (West US 2, pay-as-you-go, compute only): ~4 VMs.
-Kafka broker disks (`256Gi` premium CSI, from the Helm chart -- not this
-module) dominate storage cost once the chart is installed.
+Kafka broker disks (`256Gi` premium CSI from the Helm chart) dominate storage
+cost once the chart is installed.
 
 ## Prerequisites
 
@@ -46,87 +61,141 @@ module) dominate storage cost once the chart is installed.
    to assign `Key Vault Secrets User` on the existing vault.
 2. Terraform >= 1.5.
 3. Your public IP (and any CI runner CIDRs) for the AKS API allowlist.
-4. An existing Key Vault with the DB passwords (or ready to receive them
-   under the chart naming convention).
+4. An existing Key Vault.
+5. Postgres Flexible Server + MySQL already on a VNet you can peer
+   (private access; public network disabled is fine).
 
 ```bash
-curl -s https://ifconfig.me
+curl -4 -s https://ifconfig.me
+az account show --query id -o tsv
 ```
 
-## Apply
+---
+
+## 1. Terraform apply
 
 ```bash
-cd terraform
+cd from_work/cdc/terraform   # or aks/terraform if that is your tree
 cp terraform.tfvars.example terraform.tfvars
-# fill in subscription_id and api_server_authorized_ip_ranges
+# Edit terraform.tfvars:
+#   subscription_id
+#   api_server_authorized_ip_ranges = ["YOUR.PUBLIC.IP/32"]
+#   key_vault_name / key_vault_resource_group_name
+#   peer_vnet_ids = [".../virtualNetworks/<db-vnet>"]   # recommended now
 terraform init
 terraform plan
 terraform apply
 ```
 
-Useful outputs after apply:
+Useful outputs:
 
 ```bash
-terraform output aks_get_credentials
+terraform output -raw aks_get_credentials
+terraform output -raw acr_login_server
+terraform output -raw keyvault_csi_client_id
+terraform output -raw vnet_id
 terraform output -raw helm_values_snippet
-terraform output -raw acr_push_token_password   # sensitive
 ```
 
-## Wire up for the Helm chart
+`helm_values_snippet` is a **cheat sheet** for filling placeholders in
+`aks/values.local.yaml` (image tag must stay `3.9-cdc1`). Full values and
+chart install steps are in [`aks/README.md`](../aks/README.md).
 
-After `terraform apply`, still outside this module:
+---
 
-1. **kubeconfig**
-   ```bash
-   eval "$(terraform output -raw aks_get_credentials)"
-   ```
+## 7. VNet peering + private DNS
 
-2. **ACR push secret** (Strimzi Connect image build) -- same as
-   [`aks/README.md`](../aks/README.md) prerequisites:
-   ```bash
-   kubectl create namespace cdc-rollback
-   kubectl create secret docker-registry acr-push-credentials \
-     -n cdc-rollback \
-     --docker-server="$(terraform output -raw acr_login_server)" \
-     --docker-username="$(terraform output -raw acr_push_token_name)" \
-     --docker-password="$(terraform output -raw acr_push_token_password)"
-   ```
+Postgres/MySQL Flexible Servers with private access resolve via private DNS
+zones linked only to the DB VNet. AKS needs:
 
-3. **`aks/values.local.yaml`** -- paste `helm_values_snippet`, then add the
-   five `instances:` blocks from [`aks/values.example.yaml`](../aks/values.example.yaml).
+1. **Bidirectional peering** (no overlapping CIDRs — this module defaults to
+   `10.240.0.0/16`; many DB VNets use `10.0.0.0/16`).
+2. **Private DNS zone links** from each DB private zone onto the AKS VNet.
 
-4. **Key Vault secrets** in the **existing** vault named by
-   `key_vault_name` (naming convention required by the chart):
-   ```bash
-   az keyvault secret set --vault-name "$(terraform output -raw key_vault_name)" \
-     -n cdc-<name>-postgres-password --value '...'
-   az keyvault secret set --vault-name "$(terraform output -raw key_vault_name)" \
-     -n cdc-<name>-mysql-password --value '...'
-   ```
-   Skip seeding if those secrets already exist under those exact names.
+### 7a. Local half (Terraform)
 
-5. **Database reachability** -- peer this VNet (`terraform output -raw vnet_id`)
-   to the VNets hosting the five Postgres + MySQL Flexible Servers, and ensure
-   private DNS resolves. Set `peer_vnet_ids` to create the local peering half
-   from this module; create the remote half (and DNS) on the DB side. Then run
-   the `nc` checks in [`aks/README.md`](../aks/README.md).
+Set in `terraform.tfvars` and apply (can be part of step 1):
 
-6. Install Strimzi + the chart per [`aks/README.md`](../aks/README.md).
+```hcl
+peer_vnet_ids = [
+  "/subscriptions/<sub>/resourceGroups/<db-rg>/providers/Microsoft.Network/virtualNetworks/<db-vnet>",
+]
+```
+
+### 7b. Remote half + DNS links (Azure CLI on the DB side)
+
+```bash
+AKS_VNET="$(cd ../terraform && terraform output -raw vnet_id)"
+DB_RG=dbmig-dev-rg          # your DB resource group
+DB_VNET=dbmig-dev-vnet      # your DB VNet name
+
+# Remote peering (DB → AKS)
+az network vnet peering create \
+  -g "$DB_RG" --vnet-name "$DB_VNET" -n to-cdc-aks \
+  --remote-vnet "$AKS_VNET" \
+  --allow-vnet-access --allow-forwarded-traffic
+
+# Link each Flexible Server private DNS zone to the AKS VNet
+# (zone names are whatever Azure created for your servers)
+az network private-dns link vnet create \
+  -g "$DB_RG" \
+  -z <pg-server>.private.postgres.database.azure.com \
+  -n cdc-aks-pg-dns-link \
+  -v "$AKS_VNET" -e false
+
+az network private-dns link vnet create \
+  -g "$DB_RG" \
+  -z <mysql-server>.private.mysql.database.azure.com \
+  -n cdc-aks-mysql-dns-link \
+  -v "$AKS_VNET" -e false
+```
+
+After peering, verify reachability from the cluster (namespace must exist —
+created in the aks README install steps):
+
+```bash
+kubectl run -n cdc-rollback -it --rm netcheck --image=busybox:1.36 --restart=Never -- \
+  sh -c 'nslookup <pg-host>.postgres.database.azure.com; \
+         nc -z -w 5 <pg-host>.postgres.database.azure.com 5432 && echo PG_OK; \
+         nc -z -w 5 <mysql-host>.mysql.database.azure.com 3306 && echo MYSQL_OK'
+```
+
+Both must print `PG_OK` / `MYSQL_OK` before Connect can reach the databases.
 
 ## Network notes
 
 - Overlay pod CIDR is `10.244.0.0/16` (cluster-internal only). Nodes use
-  `aks_subnet_prefix` (default `10.240.0.0/22`). Change `vnet_address_space`
-  if it collides with a DB VNet you will peer.
+  `aks_subnet_prefix` (default `10.240.0.0/22`).
 - This module does **not** create private endpoints or private DNS for
-  Postgres/MySQL -- those stay with the database owners.
+  Postgres/MySQL — only the local peering half when `peer_vnet_ids` is set.
+- Changing CDC `vm_size` requires `temporary_name_for_rotation` (already set
+  in `aks.tf`) and spare regional vCPU for a temporary pool during rotation.
+
+---
 
 ## Destroy
 
-```bash
-# Helm/Strimzi first if installed -- broker PVCs are retained by design
-helm uninstall cdc-rollback -n cdc-rollback || true
-kubectl delete pvc -n cdc-rollback -l strimzi.io/cluster=cdc-kafka || true
+**Always uninstall Helm and delete broker PVCs before `terraform destroy`.**
+Otherwise Azure Disks stay attached, the CDC node pool sticks in `Deleting`,
+and Terraform times out (~60m). App teardown commands live in
+[`aks/README.md`](../aks/README.md) (Full teardown); then:
 
+```bash
+eval "$(cd from_work/cdc/terraform && terraform output -raw aks_get_credentials)"
+
+# From aks README: helm uninstall cdc-rollback + strimzi, delete PVCs/pods
+
+cd from_work/cdc/terraform
 terraform destroy
 ```
+
+If destroy fails because state still has a pool Azure already deleted:
+
+```bash
+terraform state rm azurerm_kubernetes_cluster_node_pool.cdc
+terraform destroy
+```
+
+Optional cleanup on the DB side (not managed by this module): remote peering
+`to-cdc-aks`, private DNS links `cdc-aks-*-dns-link`, and Postgres
+replication slots/publications when you are done capturing.
