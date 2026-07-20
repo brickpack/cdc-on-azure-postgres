@@ -1,8 +1,8 @@
 {{- /*
 One Debezium source connector per enabled instance. Per-instance topic
 prefix (cdc-<name>) is what keeps rollbacks isolated: each rollback sink
-consumes only its own instance's topics. The Docker single-instance setup
-uses the bare prefix "cdc" instead.
+consumes only its own instance's topics. Same convention as the Docker
+setup (scripts/deploy-postgres-source.sh).
 
 Passwords are never templated here -- ${directory:...} placeholders are
 resolved inside the Connect workers from that instance's own Key Vault CSI
@@ -27,16 +27,24 @@ spec:
     database.hostname: {{ .postgres.host | quote }}
     database.port: {{ .postgres.port | quote }}
     database.user: {{ .postgres.user | quote }}
-    database.password: '${directory:/mnt/keyvault-{{ .name }}:cdc-{{ .name }}-postgres-password}'
+    # Filename is objectAlias from keyvault.yaml (stable); KV object name
+    # may differ via postgres.passwordSecret.
+    database.password: '${directory:/mnt/keyvault-{{ .name }}:postgres-password}'
     database.dbname: {{ .postgres.dbname | quote }}
     topic.prefix: cdc-{{ .name }}
-    # Fixed naming convention: create the publication as cdc_<name> on each
-    # server (see aks/README.md "Prerequisites"). Debezium creates the slot.
-    slot.name: cdc_{{ .name }}
-    publication.name: cdc_{{ .name }}
+    # Slot/publication default to cdc_<name>; set postgres.slotName /
+    # postgres.publicationName per instance when the server was provisioned
+    # with different names (e.g. scripts/cdc_setup.sql's <DB_NAME>_cdc_slot /
+    # <DB_NAME>_cdc_publication). The publication must already exist on the
+    # server (see aks/README.md "Prerequisites").
+    slot.name: {{ .postgres.slotName | default (printf "cdc_%s" .name) }}
+    publication.name: {{ .postgres.publicationName | default (printf "cdc_%s" .name) }}
     publication.autocreate.mode: disabled
     plugin.name: pgoutput
     snapshot.mode: never
+    # Defense in depth: never stream pg_chameleon replica-metadata tables
+    # even if they were accidentally left in the publication.
+    schema.exclude.list: sch_chameleon
     tombstones.on.delete: "true"
     decimal.handling.mode: precise
     time.precision.mode: connect
@@ -49,9 +57,11 @@ spec:
 EMERGENCY ONLY: rollback sinks. .Values.rollback is a list of instance
 names, set solely via scripts/deploy-rollback-sink.sh. Connection details
 come from the instance's mysql block; the password comes from Key Vault at
-runtime. Config mirrors ../../docker/connectors/mysql-sink-standby.json merged with the
-active transforms from ../../docker/connectors/type-transforms.json (unwrap +
-routeTopic), with the topic regexes adjusted for the per-instance prefix.
+runtime. Config mirrors connectors/mysql-sink-standby.json merged with the
+active transforms from connectors/type-transforms.json (unwrap +
+routeTopic), with the topic regexes adjusted for the per-instance prefix
+and the heartbeat topic excluded (its table exists only in Postgres --
+replaying it would fail the sink, since auto.create is off).
 The inactive per-column transform templates (boolToTinyInt, tsTzToDatetime,
 enumWorkaround) still live in type-transforms.json -- if validation showed
 you need one, add it here before a real rollback.
@@ -77,10 +87,10 @@ spec:
   class: io.confluent.connect.jdbc.JdbcSinkConnector
   tasksMax: 1
   config:
-    topics.regex: 'cdc-{{ $name }}\..*'
+    topics.regex: '^cdc-{{ $name }}\.(?!cdc\.debezium_heartbeat$).*$'
     connection.url: 'jdbc:mysql://{{ $mysql.host }}:{{ $mysql.port }}/{{ $mysql.dbname }}?useSSL=true&serverTimezone=UTC'
     connection.user: {{ $mysql.user | quote }}
-    connection.password: '${directory:/mnt/keyvault-{{ $name }}:cdc-{{ $name }}-mysql-password}'
+    connection.password: '${directory:/mnt/keyvault-{{ $name }}:mysql-password}'
     insert.mode: upsert
     pk.mode: record_key
     auto.create: "false"

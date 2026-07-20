@@ -14,6 +14,7 @@
     "publication.autocreate.mode": "disabled",
     "plugin.name": "pgoutput",
     "snapshot.mode": "never",
+    "schema.exclude.list": "sch_chameleon",
     "schema.history.internal.kafka.bootstrap.servers": "kafka:9092",
     "schema.history.internal.kafka.topic": "schema-history.cdc-rollback",
     "tombstones.on.delete": "true",
