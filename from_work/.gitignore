@@ -149,9 +149,8 @@ activemq-data/
 
 
 # Terraform local state / vars (secrets and environment-specific CIDRs).
-# Keep terraform/.terraform.lock.hcl in git.
+# Keep cdc/terraform/.terraform.lock.hcl tracked (do not list it here).
 cdc/terraform/.terraform/
-cdc/terraform/.terraform.lock.hcl
 cdc/terraform/terraform.tfvars
 cdc/terraform/*.tfstate
 cdc/terraform/*.tfstate.*
@@ -161,6 +160,10 @@ cdc/terraform/override.tf
 cdc/terraform/override.tf.json
 cdc/terraform/*_override.tf
 cdc/terraform/*_override.tf.json
+
+# AKS Helm values -- real hosts, tenant/CSI IDs (passwords stay in Key Vault).
+# Keep cdc/aks/values.example.yaml tracked.
+cdc/aks/values.local.yaml
 
 # Environments
 .env

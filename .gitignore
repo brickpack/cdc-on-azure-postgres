@@ -150,13 +150,13 @@ activemq-data/
 # Environments
 .env
 .envrc
-# AKS deployment values -- holds real Postgres credentials, like .env
+# AKS Helm values -- real hosts, tenant/CSI IDs (passwords stay in Key Vault).
+# Keep aks/values.example.yaml tracked.
 aks/values.local.yaml
 
 # Terraform local state / vars (secrets and environment-specific CIDRs).
-# Keep aks/terraform/.terraform.lock.hcl in git.
+# Keep aks/terraform/.terraform.lock.hcl tracked (do not list it here).
 aks/terraform/.terraform/
-aks/terraform/.terraform.lock.hcl
 aks/terraform/terraform.tfvars
 aks/terraform/*.tfstate
 aks/terraform/*.tfstate.*
