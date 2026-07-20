@@ -1,8 +1,13 @@
 # cdc-on-azure-postgres
 
 Kafka + Debezium pipeline that records every change made to Postgres after a
-MySQL -> Postgres migration, so that the migration can be rolled back if
-something goes wrong within the retention window.
+MySQL → Postgres migration, so the migration can be rolled back if something
+goes wrong within the retention window.
+
+**Two runtimes, one pipeline.** This README is the product guide (architecture,
+DB prep, rollback rules) plus the **Docker Compose on a VM** path. For AKS
+(Helm + Strimzi + Key Vault), use [`aks/README.md`](aks/README.md) after the
+shared sections below.
 
 ## Architecture overview
 
@@ -16,7 +21,7 @@ rollback is actually triggered.
                                    ALWAYS RUNNING
                       ┌──────────────────────────────────┐
    Azure Postgres     │   Debezium source connector      │      Kafka topics
-  Flexible Server  ───┼─▶ (pgoutput, logical replication)┼──▶  cdc.<schema>.<table>
+  Flexible Server  ───┼─▶ (pgoutput, logical replication)┼──▶  cdc-<name>.<schema>.<table>
   (post-cutover       │   continuous, at cutover)        │   (7 days / 168h retention
    system of record)  │                                  │     = your rollback window)
                       └──────────────────────────────────┘                  │
@@ -36,28 +41,58 @@ rollback is actually triggered.
                                                                post-cutover)
 ```
 
-Normal operation: Postgres -> Debezium -> Kafka. Nothing downstream of
-Kafka is running. MySQL is idle and receives nothing.
+Normal operation: Postgres → Debezium → Kafka. Nothing downstream of Kafka
+is running. MySQL is idle and receives nothing.
 
 Rollback only: the JDBC sink is deployed, pointed at the original MySQL,
 and replays the entire Kafka log into it. Once replay catches up, MySQL
 contains everything Postgres had at the moment of rollback, and the
 application can be flipped back.
 
+## Choose your runtime
+
+| | Docker Compose (this README) | AKS ([`aks/README.md`](aks/README.md)) |
+|---|---|---|
+| Where it runs | One VM (`docker compose`) | AKS + Strimzi Helm chart |
+| Kafka | Single broker, RF=1 | 3 brokers, RF=3 |
+| Secrets | `instances/<name>.env` on the VM | Azure Key Vault CSI |
+| Deploy connectors | REST scripts (`deploy-*.sh`) | `KafkaConnector` CRs / `helm upgrade` |
+| When to use | Lab, single VM, air-gapped image copy | HA rollback log, Key Vault, multi-DB ops |
+
+Shared for both: architecture above, Postgres/MySQL prep, instance naming,
+type-transform validation, rollback checklist concepts, and “When NOT to
+rollback.” Platform-specific install and day-2 commands stay in their own
+sections / the aks README.
+
+## Instance naming (both runtimes)
+
+An **instance** is the pipeline id used for connectors, topics, slots,
+publications, and secrets. Prefer a short lowercase nickname (e.g. schema
+`toolbox` → instance `toolbox`):
+
+| Artifact | Name |
+|---|---|
+| Topic prefix | `cdc-<name>` (e.g. `cdc-toolbox.public.orders`) |
+| Source / sink connectors | `postgres-source-<name>`, `mysql-rollback-sink-<name>` |
+| Publication + slot (default) | `cdc_<name>` (e.g. `cdc_toolbox`) |
+| Compose secrets | `instances/<name>.env` |
+| AKS config | `instances[].name` in `aks/values.local.yaml` |
+
+Defaults match the Helm chart. Older `<DB_NAME>_cdc_slot` /
+`<DB_NAME>_cdc_publication` names still work if you set `SLOT_NAME` /
+`PUBLICATION_NAME` (Compose) or `postgres.slotName` /
+`postgres.publicationName` (AKS). Prefer creating the publication as
+`cdc_<name>` and letting Debezium create the slot on first start.
+
 ## Prerequisites
 
-Split the setup by scope:
+Canonical SQL is in [`scripts/cdc_setup.sql`](scripts/cdc_setup.sql). Summary
+below. Split setup by scope:
 
-- **Once per Postgres server**: enable logical replication and create the
-  shared `cdc_replication` role.
-- **Once per database you plan to capture on that server**: grant that role
-  access to the database's application schemas, then create that database's
-  publication and heartbeat table.
-
-If one Azure Postgres Flexible Server hosts 15 application databases, you
-still create `cdc_replication` only once on that server. You then repeat the
-per-database grants/publication/heartbeat setup 15 times, once while
-connected to each database.
+- **Once per Postgres server**: `wal_level=logical`, shared `cdc_replication`
+  role.
+- **Once per database** you capture on that server: grants, publication,
+  heartbeat table (slot optional — Debezium can create it).
 
 ### Postgres logical replication
 
@@ -65,57 +100,38 @@ On Azure Database for PostgreSQL Flexible Server:
 
 1. Set `wal_level = logical` in the server's parameter blade (or via `az
 postgres flexible-server parameter set --name wal_level --value logical`).
-   **This requires a server restart on Azure Flexible Server** -- plan for
+   **This requires a server restart on Azure Flexible Server** — plan for
    a brief connection interruption.
 2. Once per server, create a dedicated replication user:
    ```sql
    CREATE USER cdc_replication WITH REPLICATION LOGIN PASSWORD 'PLACEHOLDER_REPLICATION_PASSWORD';
    ```
-3. Once per database you want to capture on that server, connect to that
-   database and grant the role access to the application schemas Debezium
-   will read. Replace `APP_SCHEMA` with each real schema that contains tables
-   for this database; if the database has multiple application schemas,
-   repeat the schema-grant lines for each one.
+3. Once per database, grant access to application schemas (replace
+   `APP_SCHEMA` / `POSTGRES_DBNAME` as needed):
 
    ```sql
    GRANT CONNECT ON DATABASE POSTGRES_DBNAME TO cdc_replication;
-
    GRANT USAGE ON SCHEMA <APP_SCHEMA> TO cdc_replication;
-
    GRANT SELECT ON ALL TABLES IN SCHEMA <APP_SCHEMA> TO cdc_replication;
-
    GRANT SELECT, USAGE ON ALL SEQUENCES IN SCHEMA <APP_SCHEMA> TO cdc_replication;
-
    ALTER DEFAULT PRIVILEGES IN SCHEMA <APP_SCHEMA>
      GRANT SELECT ON TABLES TO cdc_replication;
-
    ALTER DEFAULT PRIVILEGES IN SCHEMA <APP_SCHEMA>
      GRANT SELECT, USAGE ON SEQUENCES TO cdc_replication;
    ```
 
-   If different owner roles create tables or sequences in that database,
-   run the `ALTER DEFAULT PRIVILEGES` statements as each owner, or use
-   `ALTER DEFAULT PRIVILEGES FOR ROLE app_owner ...` for each one.
-
-4. In that same database, create the heartbeat schema/publication and set up
-   the heartbeat table (run as a Postgres superuser / admin):
+4. Heartbeat schema, publication, and heartbeat table (admin). Use the
+   **instance nickname**, not the Azure DB name, unless you override slot /
+   publication in config:
 
    ```sql
-   -- Schema that Debezium writes its heartbeat into
    CREATE SCHEMA IF NOT EXISTS cdc;
    GRANT USAGE, CREATE ON SCHEMA cdc TO cdc_replication;
 
-   -- App tables + heartbeat only. Do NOT use FOR ALL TABLES -- that would
-   -- include sch_chameleon (pg_chameleon replica metadata). PG 15+; on PG 14
-   -- list public.* + cdc.debezium_heartbeat explicitly instead.
-   CREATE PUBLICATION <DB_NAME>_cdc_publication FOR TABLES IN SCHEMA public, cdc;
+   -- App + heartbeat only — not FOR ALL TABLES (excludes sch_chameleon)
+   CREATE PUBLICATION cdc_<name> FOR TABLES IN SCHEMA public, cdc;
+   -- e.g. CREATE PUBLICATION cdc_toolbox FOR TABLES IN SCHEMA public, cdc;
 
-    -- Create the logical replication slot Debezium will use for this database
-    -- (set SLOT_NAME in instances/<name>.env to this same value)
-    SELECT * FROM pg_create_logical_replication_slot('<DB_NAME>_cdc_slot', 'pgoutput');
-
-   -- Heartbeat table -- required for WAL LSN advancement when no other DML
-   -- hits a published table (see "Heartbeat" in Troubleshooting)
    CREATE TABLE IF NOT EXISTS cdc.debezium_heartbeat (
      id int PRIMARY KEY,
      ts timestamptz
@@ -123,108 +139,77 @@ postgres flexible-server parameter set --name wal_level --value logical`).
    INSERT INTO cdc.debezium_heartbeat (id, ts)
    VALUES (1, now())
    ON CONFLICT DO NOTHING;
-
    GRANT SELECT, INSERT, UPDATE ON TABLE cdc.debezium_heartbeat TO cdc_replication;
-
    ```
 
-5. Confirm the replication user can create/use logical replication slots by
-   checking that `rolreplication` is `true`:
+   Leave the publication owned by the admin role on Azure (schema-level pubs
+   require a superuser owner). Do **not** pre-create a slot under a different
+   name than the connector’s `slot.name` — orphans pin WAL. Debezium creates
+   `cdc_<name>` on first start if missing.
+
+5. Confirm `rolreplication` is true for `cdc_replication`:
 
    ```sql
-   SELECT rolname, rolreplication
-   FROM pg_roles
-   WHERE rolname = 'cdc_replication';
+   SELECT rolname, rolreplication FROM pg_roles WHERE rolname = 'cdc_replication';
    ```
 
 ### MySQL rollback target
 
 On the original source Azure Database for MySQL Flexible Server:
 
-1. Once per MySQL server, create a dedicated rollback user. If one MySQL
-   server hosts multiple databases that might need rollback, you can reuse
-   the same user across them and grant it per database.
+1. Once per MySQL server, create a dedicated rollback user (reuse across DBs
+   on that server if you want):
 
    ```sql
    CREATE USER 'cdc_rollback'@'%'
    IDENTIFIED BY 'PLACEHOLDER_MYSQL_PASSWORD';
    ```
 
-2. Once per database that might be a rollback target, grant only the DML the
-   JDBC sink needs. This connector is configured with `auto.create=false` and
-   `auto.evolve=false`, so tables must already exist and this user does not
-   need `CREATE`, `ALTER`, or `DROP` privileges.
+2. Once per rollback-target database (`auto.create` / `auto.evolve` are off —
+   tables must already exist):
 
    ```sql
    GRANT SELECT, INSERT, UPDATE, DELETE ON `MYSQL_DBNAME`.* TO 'cdc_rollback'@'%';
-   ```
-
-   Repeat this grant once per database that might need rollback.
-
-3. Apply the privilege changes:
-
-   ```sql
    FLUSH PRIVILEGES;
-   ```
-
-4. Verify the grants:
-
-   ```sql
    SHOW GRANTS FOR 'cdc_rollback'@'%';
    ```
 
-### Phase 9 - MySQL requirements
+### MySQL binlog requirements
 
-Verify the source MySQL server is using row-based binlogging with full row
-images:
+```sql
+SHOW VARIABLES LIKE 'binlog_format';      -- expect ROW
+SHOW VARIABLES LIKE 'binlog_row_image';   -- expect FULL
+```
 
-1. Check `binlog_format`:
+Compose: set each instance’s `ORIGINAL_MYSQL_USER` / password to this
+rollback user. AKS: `mysql.user` in `values.local.yaml` + Key Vault secret.
 
-   ```sql
-   SHOW VARIABLES LIKE 'binlog_format';
-   ```
+---
 
-   Expected: `ROW`
+## Docker Compose (VM)
 
-2. Check `binlog_row_image`:
+Install and day-2 ops for the **single-VM Compose** path (through Normal
+operation). Type-transform checks, rollback rules, and “When NOT to
+rollback” after that are shared with AKS. Troubleshooting at the end is
+Compose-specific. For AKS install, use [`aks/README.md`](aks/README.md)
+after Prerequisites above.
 
-   ```sql
-   SHOW VARIABLES LIKE 'binlog_row_image';
-   ```
-
-   Expected: `FULL`
-
-If one MySQL server hosts 15 rollback-target databases, create the user once
-and repeat the per-database `GRANT` 15 times. Set each instance's
-`ORIGINAL_MYSQL_USER` / `ORIGINAL_MYSQL_PASSWORD` to this rollback user.
-
-## Pre-cutover setup
+### Pre-cutover setup
 
 Run this **before** cutover, while pg_chameleon is still the active
 replication path from MySQL to Postgres.
 
-This stack supports multiple database instances (different Postgres
-servers, different original MySQL servers) behind **one** shared Kafka +
-Kafka Connect deployment -- you do not stand up a separate docker compose
-stack per database. Each instance gets its own connector, topic prefix
-(`cdc-<name>`), replication slot, and rollback target; see
-["Adding another instance"](#adding-another-instance) below.
-
-Instance naming convention:
-
-- An `instance` is the pipeline identifier used across connectors, topics,
-  slot/publication names, and secrets.
-- Use your application schema name as the instance name (for example,
-  schema `toolbox` => `instances/toolbox.env`, connector
-  `postgres-source-toolbox`, topic prefix `cdc-toolbox`).
-- Keep it lowercase and simple; if your schema contains characters not valid
-  in Postgres identifiers, use a normalized equivalent for the instance name.
+One shared Kafka + Connect stack serves many instances (different Postgres /
+MySQL servers). Each instance gets its own connector, topics, slot, and
+rollback target — see [Instance naming](#instance-naming-both-runtimes) and
+[Adding another instance](#adding-another-instance).
 
 1. For **each** database you want to capture, copy
    `instances/example.env.example` to `instances/<name>.env` (for example,
-   `instances/toolbox.env`) and fill in that instance's Postgres connection
-   details, slot name, publication name, and original MySQL rollback target
-   credentials.
+   `instances/toolbox.env`) and fill in Postgres connection details and
+   MySQL rollback credentials. Prefer defaults
+   `SLOT_NAME=cdc_<name>` / `PUBLICATION_NAME=cdc_<name>` (matching the
+   publication you created in Prerequisites).
 
 2. Copy `.env.example` to `.env` and fill in shared stack settings (Kafka
    data directory, Connect host name, WAL threshold, etc). Do **not** put
@@ -293,7 +278,9 @@ Instance naming convention:
 For each instance, the script creates the `cdc.debezium_heartbeat` table
 if it is missing, then submits the connector config. Debezium starts in
 **streaming mode immediately** (no snapshot -- it captures changes from
-the point of deploy forward). 6. Confirm every connector reaches `RUNNING` state:
+the point of deploy forward).
+
+7. Confirm every connector reaches `RUNNING` state:
 
 ```bash
 ./scripts/cdc-status.sh                       # if only one instance is configured
@@ -306,7 +293,7 @@ Or quickly (substitute your instance name):
 curl -s http://localhost:8083/connectors/postgres-source-toolbox/status | jq .
 ```
 
-## Cutover procedure
+### Cutover procedure
 
 Repeat this checklist independently for each instance -- cutting one
 database over does not require pausing or touching any other instance's
@@ -331,7 +318,7 @@ pipeline.
 4. **Keep that instance's original MySQL server running and idle.** Do not
    stop or decommission it -- it is that database's rollback target.
 
-## Adding another instance
+### Adding another instance
 
 Onboarding another database (a different Postgres server, a different
 original MySQL server) does not require a second Kafka/Kafka Connect stack
@@ -341,7 +328,7 @@ and does not disrupt any instance already running:
    `cdc` schema, publication, heartbeat table -- against its own server.
 2. Copy `instances/example.env.example` to `instances/<name>.env` and fill
    in that instance's details (Postgres source + original MySQL rollback
-   target).
+   target). Prefer `SLOT_NAME=cdc_<name>` / `PUBLICATION_NAME=cdc_<name>`.
 3. Deploy just that instance's source connector:
    ```bash
    ./scripts/deploy-postgres-source.sh <name>
@@ -357,9 +344,9 @@ To remove an instance entirely once it's no longer needed (not a rollback --
 just decommissioning), delete its connectors and drop its replication slot:
 see `./scripts/teardown.sh <name>` in "Post-rollback cleanup" below.
 
-## Normal operation
+### Normal operation
 
-### Comprehensive status report
+#### Comprehensive status report
 
 Run this at any time to get a full picture of pipeline health. With only
 one instance configured under `instances/`, no flag is needed; with more
@@ -393,7 +380,7 @@ To also show INSERT / UPDATE / DELETE breakdown (reads every message — slow on
 ./scripts/cdc-status.sh --instance toolbox --tables --ops
 ```
 
-### Automated health monitor
+#### Automated health monitor
 
 Run this on a schedule (cron, systemd timer, etc.) -- it exits non-zero if
 anything is wrong, making it suitable for alerting. With no arguments it
@@ -426,6 +413,8 @@ logs kafka-connect`. Every minute it's down is a gap in the change log.
   in `docker-compose.yml`). That is your hard rollback window -- see "When
   NOT to rollback" below.
 
+---
+
 ## Type transform validation
 
 Before triggering a real rollback, validate each transform in
@@ -448,75 +437,67 @@ definition and re-test before proceeding with a real rollback.
 
 ## Rollback procedure
 
-Run as a checklist, in order, **for the one instance being rolled back**.
-Other instances are unaffected -- their source connectors keep capturing
-changes the entire time.
+Shared checklist for **one instance**. Other instances keep capturing.
+Deploy/monitor commands differ by runtime.
 
 1. **Stop application writes** to that instance's Postgres (maintenance
    mode, scale down write paths, etc -- outside the scope of this repo).
-2. Deploy the sink:
+2. **Deploy the MySQL sink** for that instance only:
+
+   **Compose:**
    ```bash
    ./scripts/deploy-rollback-sink.sh <instance_name>
    ```
-   `instance_name` must match `instances/<instance_name>.env`. The script
-   merges `type-transforms.json` into `mysql-sink-standby.json`, reads that
-   instance's `ORIGINAL_MYSQL_*` connection details from
-   `instances/<instance_name>.env`, scopes `topics.regex` to just this
-   instance's topics, deploys it, and starts monitoring.
-3. **Monitor replay progress** -- the script prints connector state and
-   consumer lag every 10 seconds.
-4. **Wait for Kafka consumer lag to hit zero** before trusting the data in
-   MySQL is complete.
-5. Run row count verification on both sides for every table:
-   ```sql
-   -- Postgres
-   SELECT count(*) FROM my_table;
-   -- MySQL
-   SELECT count(*) FROM my_table;
-   ```
-   Counts won't always match exactly if deletes/inserts raced with the
-   stop-writes step -- investigate any large discrepancy, not just any
-   discrepancy.
-6. Spot-check critical tables for data integrity, e.g.:
-   ```sql
-   -- Postgres
-   SELECT * FROM my_critical_table ORDER BY updated_at DESC LIMIT 20;
-   -- MySQL
-   SELECT * FROM my_critical_table ORDER BY updated_at DESC LIMIT 20;
-   ```
-7. Flip application connection strings back to the original MySQL.
-8. Verify the application is functioning against MySQL.
-9. Run `./scripts/teardown.sh <instance_name>` to remove just this
-   instance's connectors -- Kafka and Kafka Connect keep running for any
-   other instances still being captured.
+   Uses `instances/<instance_name>.env` and scopes `topics.regex` to that
+   instance.
 
-## Post-rollback cleanup
+   **AKS:** see [`aks/README.md` — Rollback](aks/README.md#rollback-procedure-per-instance)
+   (`./aks/scripts/deploy-rollback-sink.sh <name>` or
+   `helm upgrade … --set-json 'rollback=["<name>"]'`).
 
-- Drop the Debezium replication slot on that instance's Postgres (printed
-  by `teardown.sh`, also here for reference):
+3. **Monitor replay** until consumer lag hits zero (Compose script prints
+   lag every 10s; AKS: Connect status + consumer group lag as in aks README).
+4. Row-count and spot-check critical tables on Postgres vs MySQL.
+5. Flip application connection strings back to the original MySQL.
+6. Verify the application against MySQL.
+7. **Tear down that instance’s connectors** (leave Kafka/Connect up for
+   other instances):
+
+   **Compose:** `./scripts/teardown.sh <instance_name>`
+
+   **AKS:** clear rollback list with `--set-json 'rollback=[]'`, then
+   decommission source/slot per aks README.
+
+### Post-rollback cleanup
+
+- Drop the Debezium replication slot on that instance's Postgres (Compose
+  `teardown.sh` prints the name; default is `cdc_<name>`):
   ```sql
-  SELECT pg_drop_replication_slot('SLOT_NAME');
+  SELECT pg_drop_replication_slot('cdc_<name>');
   ```
-- Decommission the Azure VM once **every** instance it hosts is no longer
-  needed -- run `./scripts/teardown.sh --all` only once nothing on the VM
-  is still required (this stops Kafka + Connect for every instance).
-- Decide what to do with that instance's Postgres: since rollback means the
-  migration was abandoned, Postgres is now stale. Typical options are to
-  keep it read-only for a while for forensics, or decommission it once the
-  incident is closed out.
+- **Compose:** decommission the Azure VM only once **every** instance is
+  done (`./scripts/teardown.sh --all`).
+- **AKS:** tear down per [`aks/README.md`](aks/README.md) (Helm/Strimzi);
+  do not uninstall the shared stack for one instance.
+- Postgres is now stale after rollback — keep read-only for forensics or
+  decommission when the incident is closed.
 
 ## When NOT to rollback
 
-Kafka retains 168 hours (7 days) of changes. If the time between cutover
-and the decision to roll back exceeds that window, **older changes have
-already been deleted from the log** and the change log is incomplete --
+Kafka retains 168 hours (7 days) of changes (Compose:
+`KAFKA_LOG_RETENTION_HOURS`; AKS: chart Kafka config). If the time between
+cutover and the decision to roll back exceeds that window, **older changes
+have already been deleted from the log** and the change log is incomplete --
 replaying it into MySQL would silently produce data that is missing
 changes, not a faithful copy of Postgres. Past 168 hours, this pipeline can
 no longer be used for a safe rollback; you would need a different recovery
 strategy (e.g. a fresh Postgres-to-MySQL migration in reverse, or restoring
 from backups).
 
-## Troubleshooting
+## Troubleshooting (Docker Compose)
+
+Compose-specific. For AKS pods / connectors, see
+[`aks/README.md`](aks/README.md).
 
 **`docker compose` not found on the VM**
 
@@ -649,15 +630,9 @@ after a fresh deploy, confirm you have the latest `docker-compose.yml`.
 
 ---
 
-## AKS deployment
+## AKS
 
-The [`aks/`](aks/) directory runs this same pipeline on Azure Kubernetes
-Service -- Strimzi-managed Kafka (3 brokers, RF=3) and Azure Key Vault CSI
-for secrets, with the same per-instance model. Choose it over Docker
-Compose when you need Kafka HA or Key Vault-managed secrets instead of
-files on a VM.
-
-See [`aks/README.md`](aks/README.md) for everything AKS-specific:
-architecture differences, prerequisites, install, monitoring, and the
-rollback procedure. The architecture, rollback window, type-transform
-validation, and rollback checklist in this README apply unchanged.
+Same pipeline on AKS (Strimzi Kafka RF=3, Key Vault CSI). Install, monitor,
+rollback, and teardown: **[`aks/README.md`](aks/README.md)**. Shared
+sections above (architecture, naming, Postgres/MySQL prep, type transforms,
+rollback rules, retention window) still apply.

@@ -235,20 +235,17 @@ kubectl run -n cdc-rollback -it --rm netcheck --image=busybox:1.36 --restart=Nev
 
 ### 7. Postgres CDC prep (each captured database)
 
-Run [`scripts/cdc_setup.sql`](../scripts/cdc_setup.sql) (or equivalent).
-Minimum for this chart:
+Do the shared setup in the parent
+[`README.md` Prerequisites](../README.md#prerequisites) / run
+[`scripts/cdc_setup.sql`](../scripts/cdc_setup.sql). For this chart you need:
 
-- `wal_level = logical`
-- Role `cdc_replication` with `REPLICATION LOGIN` (password in Key Vault)
-- `GRANT`s on the app schema + `cdc` schema
 - Publication `cdc_<instances[].name>` (e.g. `cdc_toolbox`) with
-  `FOR TABLES IN SCHEMA public, cdc` — **not** `FOR ALL TABLES` (that pulls
-  in `sch_chameleon`). Leave pub owned by the admin role on Azure.
-- Table `cdc.debezium_heartbeat` (AKS does not auto-create it)
-- Slot is created by Debezium on first start (`cdc_<name>` by default)
+  `FOR TABLES IN SCHEMA public, cdc` — not `FOR ALL TABLES`
+- Table `cdc.debezium_heartbeat` (chart does not create it)
+- Slot `cdc_<name>` created by Debezium on first start
 
-If you used `<DB_NAME>_cdc_slot` / `<DB_NAME>_cdc_publication`, set
-`postgres.slotName` / `postgres.publicationName` in `values.local.yaml`.
+If you used older `<DB_NAME>_cdc_*` names, set `postgres.slotName` /
+`postgres.publicationName` in `values.local.yaml`.
 
 ### 8. Install Strimzi
 
