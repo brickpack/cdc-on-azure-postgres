@@ -123,6 +123,6 @@ cat <<EOF
 5. Verify the application is functioning against MySQL.
 
 6. Remove the sink:
-     helm upgrade ${RELEASE} ${CHART_DIR} -n ${NAMESPACE} --reuse-values --set rollback=null
+     helm upgrade ${RELEASE} ${CHART_DIR} -n ${NAMESPACE} --reuse-values --set-json 'rollback=[]'
    Then follow aks/README.md "Post-rollback cleanup".
 EOF

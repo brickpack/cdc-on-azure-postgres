@@ -10,9 +10,13 @@
 #   ./scripts/cdc-status.sh --instance billing --tables --ops         # topic totals + INSERT/UPDATE/DELETE breakdown (slow)
 #
 # Usage (AKS):
-#   ./scripts/cdc-status.sh --mode aks --instance billing
-#   ./scripts/cdc-status.sh --mode aks --instance billing --tables
-#   ./scripts/cdc-status.sh --mode aks --instance billing --tables --ops
+#   ./scripts/cdc-status.sh --mode aks --instance toolbox
+#   ./scripts/cdc-status.sh --mode aks --instance toolbox --tables
+#   ./scripts/cdc-status.sh --mode aks --instance toolbox --tables --ops
+#
+# AKS mode loads host/user/db/slot from aks/values.local.yaml and the
+# Postgres password from Key Vault (cdc-<name>-postgres-password). No
+# instances/<name>.env file. Requires az login + CDC_VALUES override optional.
 #
 # --ops reads every message in every topic to count operation types.
 # With large topics (thousands of messages) this takes minutes.
@@ -98,12 +102,9 @@ if [[ "$MODE" == "docker" ]]; then
   KAFKA_POD=""
   INSTANCE="$INSTANCE_NAME"
 else
-  : "${POSTGRES_HOST:?POSTGRES_HOST is not set}"
-  : "${POSTGRES_PORT:?POSTGRES_PORT is not set}"
-  : "${POSTGRES_USER:?POSTGRES_USER is not set}"
-  : "${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is not set}"
-  : "${POSTGRES_DBNAME:?POSTGRES_DBNAME is not set}"
-  : "${SLOT_NAME:?SLOT_NAME is not set}"
+  # shellcheck source=lib/load-aks-instance.sh
+  source "${SCRIPT_DIR}/lib/load-aks-instance.sh"
+  load_aks_instance "$INSTANCE" || exit 1
   : "${CDC_NAMESPACE:=cdc-rollback}"
   NAMESPACE="$CDC_NAMESPACE"
   KAFKA_POD="${CDC_KAFKA_POD:-cdc-kafka-broker-0}"
@@ -113,12 +114,16 @@ else
   COMPOSE_FILE=""
 fi
 
-# Wrapper: run a Kafka CLI command in the right environment
+# Wrapper: run a Kafka CLI command in the right environment. Call with the
+# Confluent-style tool name (e.g. kafka-topics); the Strimzi broker image
+# ships the same tool as /opt/kafka/bin/<tool>.sh.
 kafka_cmd() {
+  local tool="$1"
+  shift
   if [[ "$MODE" == "docker" ]]; then
-    docker compose -f "${ROOT_DIR}/docker-compose.yml" exec -T kafka "$@" </dev/null
+    docker compose -f "${ROOT_DIR}/docker-compose.yml" exec -T kafka "$tool" "$@" </dev/null
   else
-    kubectl exec -n "$NAMESPACE" "$KAFKA_POD" -c kafka -- "$@" </dev/null
+    kubectl exec -n "$NAMESPACE" "$KAFKA_POD" -c kafka -- "/opt/kafka/bin/${tool}.sh" "$@" </dev/null
   fi
 }
 
@@ -186,13 +191,15 @@ check_connector() {
 # ---------------------------------------------------------------------------
 pg_query() {
   local sql="$1"
+  # PGSSLMODE is set by load-aks-instance (require) or the instance .env.
   if command -v psql &>/dev/null; then
-    PGPASSWORD="$POSTGRES_PASSWORD" psql \
+    PGPASSWORD="$POSTGRES_PASSWORD" PGSSLMODE="${PGSSLMODE:-prefer}" psql \
       -h "$POSTGRES_HOST" -p "$POSTGRES_PORT" \
       -U "$POSTGRES_USER"  -d "$POSTGRES_DBNAME" \
       -t -A -c "$sql" 2>/dev/null | tr -d '[:space:]'
   else
-    PGPASSWORD="$POSTGRES_PASSWORD" docker run --rm -e PGPASSWORD \
+    PGPASSWORD="$POSTGRES_PASSWORD" PGSSLMODE="${PGSSLMODE:-prefer}" docker run --rm \
+      -e PGPASSWORD -e PGSSLMODE \
       postgres:16-alpine \
       psql -h "$POSTGRES_HOST" -p "$POSTGRES_PORT" \
            -U "$POSTGRES_USER" -d "$POSTGRES_DBNAME" \
@@ -317,11 +324,11 @@ show_table_stats() {
   while IFS= read -r topic; do
     local latest earliest total
     latest=$(kafka_cmd \
-      kafka-run-class kafka.tools.GetOffsetShell \
+      kafka-get-offsets \
       --bootstrap-server localhost:9092 --topic "$topic" --time -1 2>/dev/null \
       | awk -F: '{s+=$3} END {print s+0}')
     earliest=$(kafka_cmd \
-      kafka-run-class kafka.tools.GetOffsetShell \
+      kafka-get-offsets \
       --bootstrap-server localhost:9092 --topic "$topic" --time -2 2>/dev/null \
       | awk -F: '{s+=$3} END {print s+0}')
     total=$(( latest - earliest ))
