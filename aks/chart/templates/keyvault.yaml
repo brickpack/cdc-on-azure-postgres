@@ -6,13 +6,17 @@
 # them with ${directory:/mnt/keyvault-<name>:...}, so passwords never
 # appear in Helm values, Kubernetes Secrets, or the Connect config topic.
 #
-# Key Vault secret naming convention (must exist in THIS instance's vault
-# before THIS instance is enabled -- other instances, even in different
-# vaults, are entirely unaffected):
-#   cdc-<name>-postgres-password
-#   cdc-<name>-mysql-password
+# Key Vault object names default to cdc-<name>-postgres-password /
+# cdc-<name>-mysql-password, but may be overridden per instance when the
+# vault already stores passwords under other names:
+#   postgres.passwordSecret / mysql.passwordSecret in values.local.yaml
+# objectAlias keeps the on-disk filename stable so connectors always read
+# postgres-password / mysql-password under /mnt/keyvault-<name>/.
+# Secret *values* must currently be the raw password string (not JSON).
 {{- range .Values.instances }}
 {{- if ne .enabled false }}
+{{- $pgSecret := .postgres.passwordSecret | default (printf "cdc-%s-postgres-password" .name) }}
+{{- $mySecret := .mysql.passwordSecret | default (printf "cdc-%s-mysql-password" .name) }}
 ---
 apiVersion: secrets-store.csi.x-k8s.io/v1
 kind: SecretProviderClass
@@ -28,11 +32,13 @@ spec:
     objects: |
       array:
         - |
-          objectName: cdc-{{ .name }}-postgres-password
+          objectName: {{ $pgSecret }}
           objectType: secret
+          objectAlias: postgres-password
         - |
-          objectName: cdc-{{ .name }}-mysql-password
+          objectName: {{ $mySecret }}
           objectType: secret
+          objectAlias: mysql-password
 {{- end }}
 {{- end }}
 

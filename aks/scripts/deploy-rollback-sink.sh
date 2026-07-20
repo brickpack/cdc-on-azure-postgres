@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # EMERGENCY USE ONLY.
 #
-# AKS/Helm equivalent of docker/scripts/deploy-rollback-sink.sh. Deploys the JDBC
+# AKS/Helm equivalent of scripts/deploy-rollback-sink.sh. Deploys the JDBC
 # sink for ONE instance, pointed at that instance's original source MySQL
 # (declared in aks/values.local.yaml; password read from Key Vault at
 # runtime), and starts replaying every change queued in Kafka since cutover.
@@ -123,6 +123,6 @@ cat <<EOF
 5. Verify the application is functioning against MySQL.
 
 6. Remove the sink:
-     helm upgrade ${RELEASE} ${CHART_DIR} -n ${NAMESPACE} --reuse-values --set rollback=null
+     helm upgrade ${RELEASE} ${CHART_DIR} -n ${NAMESPACE} --reuse-values --set-json 'rollback=[]'
    Then follow aks/README.md "Post-rollback cleanup".
 EOF
