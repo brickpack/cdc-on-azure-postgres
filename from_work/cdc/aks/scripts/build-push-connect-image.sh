@@ -1,16 +1,17 @@
 #!/usr/bin/env bash
-# Builds the Kafka Connect image from the project Dockerfile and pushes it
-# to ACR. Run this before the first `helm install` and after any change to
-# the Dockerfile or its plugin versions.
+# Builds the Strimzi-compatible Kafka Connect image from aks/Dockerfile.connect
+# and pushes it to ACR. Run this before the first `helm install` and after
+# any change to Dockerfile.connect or its plugin versions.
 #
-# The same image is used by Docker Compose for local testing, so a single
-# build serves both environments.
+# NOT the same image as the Docker Compose stack: Strimzi needs its own
+# base image and plugin layout (see Dockerfile.connect). Plugin versions
+# are kept in sync with the Compose ../Dockerfile.
 #
 # Usage:
 #   ./aks/scripts/build-push-connect-image.sh
 #
 # Override the image tag via environment variable:
-#   CONNECT_IMAGE=myacr.azurecr.io/cdc-kafka-connect:7.5-cdc2 ./build-push-connect-image.sh
+#   CONNECT_IMAGE=myacr.azurecr.io/cdc-kafka-connect:3.9-cdc2 ./build-push-connect-image.sh
 #
 # The default tag is read from aks/values.local.yaml (connectImage field).
 # If that file doesn't exist yet, set CONNECT_IMAGE explicitly.
@@ -18,7 +19,6 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 AKS_DIR="$(dirname "$SCRIPT_DIR")"
-ROOT_DIR="$(dirname "$AKS_DIR")"
 VALUES_LOCAL="${AKS_DIR}/values.local.yaml"
 
 # Resolve image tag: env override > values.local.yaml > error
@@ -38,7 +38,7 @@ fi
 # Extract the registry hostname (everything before the first /)
 ACR_HOST="${CONNECT_IMAGE%%/*}"
 
-echo "==> Building ${CONNECT_IMAGE} from ${ROOT_DIR}/Dockerfile"
+echo "==> Building ${CONNECT_IMAGE} from ${AKS_DIR}/Dockerfile.connect"
 echo "    Platform: linux/amd64 (required for AKS; --platform flag ensures"
 echo "    correct arch even when building on Apple Silicon)"
 echo
@@ -46,8 +46,9 @@ echo
 docker buildx build \
   --platform linux/amd64 \
   --load \
+  -f "${AKS_DIR}/Dockerfile.connect" \
   -t "$CONNECT_IMAGE" \
-  "$ROOT_DIR"
+  "$AKS_DIR"
 
 echo
 echo "==> Logging in to ACR: ${ACR_HOST}"

@@ -1,0 +1,35 @@
+# Kafka Connect image for the AKS (Strimzi) deployment.
+#
+# Strimzi cannot run the Confluent-based image the Docker Compose stack
+# builds from ../Dockerfile: Strimzi Connect pods use their own launcher
+# scripts and load plugins from /opt/kafka/plugins, not Confluent's
+# /etc/confluent/docker/run entrypoint and /usr/share/confluent-hub-components.
+# Same plugin versions as ../Dockerfile; only the base image and layout
+# differ. Build and push with: aks/scripts/build-push-connect-image.sh
+
+FROM alpine:3.20 AS plugins
+
+ARG DEBEZIUM_VERSION=2.4.2.Final
+ARG JDBC_CONNECTOR_VERSION=10.7.4
+ARG MYSQL_CONNECTOR_VERSION=8.0.33
+
+RUN apk add --no-cache curl unzip
+
+# Debezium Postgres source connector (CDC capture)
+RUN mkdir -p /plugins \
+    && curl -fSL "https://repo1.maven.org/maven2/io/debezium/debezium-connector-postgres/${DEBEZIUM_VERSION}/debezium-connector-postgres-${DEBEZIUM_VERSION}-plugin.tar.gz" \
+       | tar xz -C /plugins
+
+# Confluent JDBC sink connector (idle rollback target), plus the MySQL JDBC
+# driver its distribution omits (GPL licensing) -- the sink is useless
+# against MySQL without it.
+RUN curl -fSL -o /tmp/jdbc.zip "https://hub-downloads.confluent.io/api/plugins/confluentinc/kafka-connect-jdbc/versions/${JDBC_CONNECTOR_VERSION}/confluentinc-kafka-connect-jdbc-${JDBC_CONNECTOR_VERSION}.zip" \
+    && unzip -q /tmp/jdbc.zip -d /plugins \
+    && curl -fSL -o "/plugins/confluentinc-kafka-connect-jdbc-${JDBC_CONNECTOR_VERSION}/lib/mysql-connector-j-${MYSQL_CONNECTOR_VERSION}.jar" \
+       "https://repo1.maven.org/maven2/com/mysql/mysql-connector-j/${MYSQL_CONNECTOR_VERSION}/mysql-connector-j-${MYSQL_CONNECTOR_VERSION}.jar"
+
+# Strimzi base matching the Kafka version the chart pins (templates/kafka.yaml)
+# and the 0.45.x operator from aks/README.md "Prerequisites".
+FROM quay.io/strimzi/kafka:0.45.0-kafka-3.9.0
+COPY --from=plugins /plugins/ /opt/kafka/plugins/
+USER 1001

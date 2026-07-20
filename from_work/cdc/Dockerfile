@@ -1,7 +1,8 @@
 # Kafka Connect image for the Postgres -> Kafka CDC rollback pipeline.
 #
-# Base image version is pinned to match confluentinc/cp-kafka:7.5.0 /
-# cp-zookeeper:7.5.0 used in docker-compose.yml (same Confluent Platform release).
+# Base image version is pinned to match confluentinc/cp-kafka:7.5.0 used in
+# docker-compose.yml (same Confluent Platform release). The AKS deployment
+# uses its own aks/Dockerfile.connect (Strimzi base, same plugin versions).
 FROM confluentinc/cp-kafka-connect:7.5.0
 
 ARG MYSQL_CONNECTOR_VERSION=8.0.33
