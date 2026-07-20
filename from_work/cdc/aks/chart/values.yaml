@@ -4,13 +4,10 @@
 # resolved at runtime (see templates/keyvault.yaml for the naming
 # convention).
 
-# Image reference Strimzi builds the Kafka Connect image into and pushes to
-# your ACR, e.g. myacr.azurecr.io/cdc-kafka-connect:7.5-cdc1. Required.
+# Strimzi-compatible Connect image built from aks/Dockerfile.connect and
+# pushed to ACR with aks/scripts/build-push-connect-image.sh,
+# e.g. myacr.azurecr.io/cdc-kafka-connect:3.9-cdc1. Required.
 connectImage: ""
-
-# docker-registry secret (in the release namespace) with push access to the
-# ACR repo above. See aks/README.md "Prerequisites".
-connectPushSecret: acr-push-credentials
 
 # Disk per Kafka broker (3 brokers, replication factor 3). Must hold 7 days
 # -- the rollback window -- of change volume for ALL instances, plus

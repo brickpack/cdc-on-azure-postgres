@@ -22,12 +22,14 @@ spec:
         # Keep the disks (= the rollback log) even if the cluster resource is
         # deleted by accident.
         deleteClaim: false
+  # Sized for 3x Standard_D2ds_v4 (~5.8Gi allocatable/node). Raise to
+  # cpu: "1" / memory: 4Gi when the CDC pool is D4ds_v4+.
   resources:
     requests:
-      cpu: "1"
-      memory: 4Gi
+      cpu: "500m"
+      memory: 2500Mi
     limits:
-      memory: 4Gi
+      memory: 2500Mi
 ---
 apiVersion: kafka.strimzi.io/v1beta2
 kind: Kafka

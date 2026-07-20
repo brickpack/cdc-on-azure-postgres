@@ -1,5 +1,5 @@
-# Shared Kafka cluster for all five CDC instances, managed by the Strimzi
-# operator (KRaft mode -- no ZooKeeper, unlike the Docker Compose stack).
+# Shared Kafka cluster for every CDC instance, managed by the Strimzi
+# operator (KRaft mode -- no ZooKeeper, same as the Docker Compose stack).
 apiVersion: kafka.strimzi.io/v1beta2
 kind: KafkaNodePool
 metadata:
@@ -22,12 +22,14 @@ spec:
         # Keep the disks (= the rollback log) even if the cluster resource is
         # deleted by accident.
         deleteClaim: false
+  # Sized for 3x Standard_D2ds_v4 (~5.8Gi allocatable/node). Raise to
+  # cpu: "1" / memory: 4Gi when the CDC pool is D4ds_v4+.
   resources:
     requests:
-      cpu: "1"
-      memory: 4Gi
+      cpu: "500m"
+      memory: 2500Mi
     limits:
-      memory: 4Gi
+      memory: 2500Mi
 ---
 apiVersion: kafka.strimzi.io/v1beta2
 kind: Kafka
