@@ -16,7 +16,7 @@
 
 # Strimzi-compatible image built from aks/Dockerfile.connect and pushed to
 # ACR. Build and push with: aks/scripts/build-push-connect-image.sh
-connectImage: PLACEHOLDER_ACR_LOGIN_SERVER/cdc-kafka-connect:3.9-cdc1
+connectImage: PLACEHOLDER_ACR_LOGIN_SERVER/cdc-kafka-connect:4.3-cdc1
 
 # One entry per database instance. name must match ^[a-z][a-z0-9]*$ -- it
 # becomes the Kafka topic prefix (cdc-<name>) and default slot/publication

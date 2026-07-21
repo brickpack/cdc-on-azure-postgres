@@ -72,7 +72,7 @@ output "cdc_node_label" {
 output "helm_values_snippet" {
   description = "Non-secret fields for aks/values.local.yaml produced by this stack. Paste the keyVault block into each instances[] entry that uses this vault (instances can use other vaults too)."
   value       = <<-EOT
-    connectImage: ${azurerm_container_registry.cdc.login_server}/cdc-kafka-connect:3.9-cdc1
+    connectImage: ${azurerm_container_registry.cdc.login_server}/cdc-kafka-connect:4.3-cdc1
     # Replace placeholders in aks/values.local.yaml (this is not a full values file):
     #   keyVault:
     #     name: ${data.azurerm_key_vault.cdc.name}

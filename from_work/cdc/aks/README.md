@@ -118,10 +118,10 @@ cp values.example.yaml values.local.yaml
 ```
 
 Fill from terraform outputs (`helm_values_snippet` is a cheat sheet — keep
-image tag `3.9-cdc1`):
+image tag `4.3-cdc1`):
 
 ```yaml
-connectImage: <acr_login_server>/cdc-kafka-connect:3.9-cdc1
+connectImage: <acr_login_server>/cdc-kafka-connect:4.3-cdc1
 
 instances:
   - name: toolbox                    # ^[a-z][a-z0-9]*$ — CDC nickname
@@ -249,15 +249,12 @@ If you used older `<DB_NAME>_cdc_*` names, set `postgres.slotName` /
 
 ### 8. Install Strimzi
 
-Strimzi **0.45.0** matches Kafka **3.9.0**. On AKS Kubernetes 1.33+ set
-`STRIMZI_KUBERNETES_VERSION` or the operator crash-loops:
+Strimzi **1.1.0** matches Kafka **4.3.0** (needs Kubernetes 1.25+; any
+current AKS default qualifies):
 
 ```bash
 helm install strimzi oci://quay.io/strimzi-helm/strimzi-kafka-operator \
-  --version 0.45.0 -n cdc-rollback
-
-kubectl set env deployment/strimzi-cluster-operator -n cdc-rollback \
-  STRIMZI_KUBERNETES_VERSION="major=1,minor=$(kubectl version -o json | sed -n 's/.*"minor": "\([0-9]*\).*/\1/p' | head -1)"
+  --version 1.1.0 -n cdc-rollback
 
 kubectl rollout status deployment/strimzi-cluster-operator -n cdc-rollback
 ```
@@ -289,7 +286,7 @@ kubectl port-forward -n cdc-rollback svc/cdc-kafbat-ui 8080:8080
 # http://localhost:8080
 ```
 
-Chart uses `snapshot.mode: never` — only changes **after** the connector
+Chart uses `snapshot.mode: no_data` — only changes **after** the connector
 starts are captured. Do not treat the rollback window as covering
 pre-connector history.
 

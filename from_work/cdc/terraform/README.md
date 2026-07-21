@@ -98,7 +98,7 @@ terraform output -raw helm_values_snippet
 ```
 
 `helm_values_snippet` is a **cheat sheet** for filling placeholders in
-`aks/values.local.yaml` (image tag must stay `3.9-cdc1`). Full values and
+`aks/values.local.yaml` (image tag must stay `4.3-cdc1`). Full values and
 chart install steps are in [`aks/README.md`](../aks/README.md).
 
 ---

@@ -6,7 +6,7 @@
 
 # Strimzi-compatible Connect image built from aks/Dockerfile.connect and
 # pushed to ACR with aks/scripts/build-push-connect-image.sh,
-# e.g. myacr.azurecr.io/cdc-kafka-connect:3.9-cdc1. Required.
+# e.g. myacr.azurecr.io/cdc-kafka-connect:4.3-cdc1. Required.
 connectImage: ""
 
 # Disk per Kafka broker (3 brokers, replication factor 3). Must hold 7 days

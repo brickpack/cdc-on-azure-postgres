@@ -14,7 +14,7 @@ mount (templates/keyvault.yaml, one per instance).
 {{- end }}
 {{- if ne .enabled false }}
 ---
-apiVersion: kafka.strimzi.io/v1beta2
+apiVersion: kafka.strimzi.io/v1
 kind: KafkaConnector
 metadata:
   name: postgres-source-{{ .name }}
@@ -41,7 +41,10 @@ spec:
     publication.name: {{ .postgres.publicationName | default (printf "cdc_%s" .name) }}
     publication.autocreate.mode: disabled
     plugin.name: pgoutput
-    snapshot.mode: never
+    # Debezium 3.x name for what 2.x (the Compose stack's
+    # connectors/postgres-source.json) calls `never`: no snapshot, stream
+    # only changes made after the connector starts.
+    snapshot.mode: no_data
     # Defense in depth: never stream pg_chameleon replica-metadata tables
     # even if they were accidentally left in the publication.
     schema.exclude.list: sch_chameleon
@@ -77,7 +80,7 @@ you need one, add it here before a real rollback.
 {{- end }}
 {{- $mysql := required (printf "instance %q has no mysql block in values -- the rollback target must be declared" $name) $inst.mysql }}
 ---
-apiVersion: kafka.strimzi.io/v1beta2
+apiVersion: kafka.strimzi.io/v1
 kind: KafkaConnector
 metadata:
   name: mysql-rollback-sink-{{ $name }}
@@ -100,8 +103,12 @@ spec:
     numeric.mapping: none
     transforms: unwrap,routeTopic
     transforms.unwrap.type: io.debezium.transforms.ExtractNewRecordState
-    transforms.unwrap.drop.tombstones: "true"
-    transforms.unwrap.delete.handling.mode: none
+    # Debezium 3.x replacement for 2.x's drop.tombstones=true +
+    # delete.handling.mode=none (still used in type-transforms.json, which
+    # runs against the Compose stack's Debezium 2.4): DELETE events become
+    # null-value tombstones (-> SQL DELETE via the sink's delete.enabled)
+    # and Debezium's own compaction tombstones are dropped.
+    transforms.unwrap.delete.tombstone.handling.mode: delete-to-tombstone
     transforms.routeTopic.type: org.apache.kafka.connect.transforms.RegexRouter
     transforms.routeTopic.regex: '^cdc-{{ $name }}\.[^.]+\.(.+)$'
     transforms.routeTopic.replacement: '$1'
