@@ -35,6 +35,9 @@ apiVersion: kafka.strimzi.io/v1
 kind: Kafka
 metadata:
   name: cdc-kafka
+  annotations:
+    strimzi.io/node-pools: enabled
+    strimzi.io/kraft: enabled
 spec:
   kafka:
     version: 4.3.0

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Prompt for MySQL and PostgreSQL passwords; write mode-0600 files (no secrets in shell history).
-# Run from your laptop or on the worker after Terraform deploy.
+# Run from your laptop or on the worker after host provisioning.
 #
 # Usage:
 #   scripts/migration/write-passwords.sh

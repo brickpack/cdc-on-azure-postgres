@@ -5,10 +5,10 @@ keeping a time-bounded **rollback path** after cutover.
 
 Two folders, three jobs:
 
-| Folder | Job |
-| --- | --- |
-| [`migration/`](migration/) | Get data onto Postgres (bulk load and/or logical replication) |
-| [`cdc/`](cdc/) | After cutover, record every Postgres change so you can replay into MySQL if you must abort |
+| Folder                     | Job                                                                                        |
+| -------------------------- | ------------------------------------------------------------------------------------------ |
+| [`migration/`](migration/) | Get data onto Postgres (bulk load and/or logical replication)                              |
+| [`cdc/`](cdc/)             | After cutover, record every Postgres change so you can replay into MySQL if you must abort |
 
 ```text
   MySQL (source)                    Postgres (target)                 MySQL (idle rollback target)
@@ -30,11 +30,11 @@ Detailed runbooks live next to each tool. This file is the map.
 
 ## Which path when?
 
-| Phase | Tool | Use when |
-| --- | --- | --- |
-| Initial / one-shot load | **pgloader** | Downtime-tolerant full copy; fastest path to a populated Postgres |
-| Online / replication-aware migrate | **pg_chameleon** | Need continuous catch-up from MySQL before cutover, richer diagnose/validate |
-| Post-cutover safety net | **CDC** (Compose or AKS) | Keep a 7-day Kafka change log of Postgres so you can roll back to MySQL |
+| Phase                              | Tool                     | Use when                                                                     |
+| ---------------------------------- | ------------------------ | ---------------------------------------------------------------------------- |
+| Initial / one-shot load            | **pgloader**             | Downtime-tolerant full copy; fastest path to a populated Postgres            |
+| Online / replication-aware migrate | **pg_chameleon**         | Need continuous catch-up from MySQL before cutover, richer diagnose/validate |
+| Post-cutover safety net            | **CDC** (Compose or AKS) | Keep a 7-day Kafka change log of Postgres so you can roll back to MySQL      |
 
 Common pattern: load with pgloader (or chameleon init), run chameleon until
 lag is acceptable, cut over, then run CDC for the retention window. Compare
@@ -73,23 +73,23 @@ Start: [`migration/scripts/pg_chameleon/README.md`](migration/scripts/pg_chamele
 into Kafka. The MySQL JDBC sink is deployed only if you trigger rollback.
 Retention is 7 days — past that window this path cannot safely restore MySQL.
 
-| Runtime | Where | Docs |
-| --- | --- | --- |
-| Docker Compose | Single VM, `instances/<name>.env` | [`cdc/README.md`](cdc/README.md) |
-| AKS | Strimzi Kafka (RF=3), Key Vault CSI, Helm | [`cdc/aks/README.md`](cdc/aks/README.md) |
-| Infra for AKS | RG, VNet, ACR, AKS, CSI role on existing vault | [`cdc/terraform/README.md`](cdc/terraform/README.md) |
+| Runtime        | Where                                                         | Docs                                     |
+| -------------- | ------------------------------------------------------------- | ---------------------------------------- |
+| Docker Compose | Single VM, `instances/<name>.env`                             | [`cdc/README.md`](cdc/README.md)         |
+| AKS            | Strimzi Kafka (RF=3), Key Vault CSI, Helm                     | [`cdc/aks/README.md`](cdc/aks/README.md) |
+| Infra for AKS  | RG, VNet, ACR, AKS, CSI role on existing vault (external IaC) | Managed outside this repo                |
 
 Shared for both CDC runtimes (in `cdc/README.md`): architecture, instance
 naming (`cdc_<name>` slots/pubs), Postgres/MySQL prep, type-transform checks,
 rollback rules, and when **not** to roll back. Install and day-2 commands
 stay in the Compose sections of that README or in the AKS runbook.
 
-Order for AKS: terraform apply (+ peering) → aks README install → operate.
+Order for AKS: external IaC apply (+ peering) → aks README install → operate.
 
 ## Layout
 
 ```text
-from_work/
+
 ├── README.md                          ← you are here
 ├── migration/
 │   └── scripts/
@@ -102,7 +102,7 @@ from_work/
     ├── scripts/                       status, monitor, deploy, teardown, load
     ├── instances/                     Compose secrets (*.env, gitignored)
     ├── aks/                           Helm chart + AKS ops scripts / README
-    └── terraform/                     Azure infra for the AKS path
+    └── terraform/                     Optional/legacy Azure infra module (not required by AKS runbook)
 ```
 
 ## Secrets and host
@@ -116,4 +116,4 @@ from_work/
 
 1. Migrating a database now → pick **pgloader** or **pg_chameleon** above.
 2. Already on Postgres / about to cut over → start with **[`cdc/README.md`](cdc/README.md)**
-   (Compose) or **[`cdc/aks/README.md`](cdc/aks/README.md)** after terraform.
+   (Compose) or **[`cdc/aks/README.md`](cdc/aks/README.md)** after external infra is ready.

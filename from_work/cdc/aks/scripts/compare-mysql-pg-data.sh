@@ -26,19 +26,13 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 AKS_DIR="$(dirname "$SCRIPT_DIR")"
 
 # Locate the cdc/ tree (values + scripts/lib) and the shared compare .py.
-# Supports running from from_work/cdc/aks/scripts or a repo-root aks/ mirror.
 resolve_cdc_root() {
   local d
-  for d in \
-    "$(dirname "$AKS_DIR")" \
-    "${AKS_DIR}/../from_work/cdc" \
-    "${AKS_DIR}/../../from_work/cdc"
-  do
-    if [[ -f "${d}/scripts/lib/load-aks-instance.sh" && -d "${d}/aks" ]]; then
-      (cd "$d" && pwd)
-      return 0
-    fi
-  done
+  d="$(dirname "$AKS_DIR")"
+  if [[ -f "${d}/scripts/lib/load-aks-instance.sh" && -d "${d}/aks" ]]; then
+    (cd "$d" && pwd)
+    return 0
+  fi
   return 1
 }
 

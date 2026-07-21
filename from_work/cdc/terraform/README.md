@@ -1,4 +1,4 @@
-# AKS Terraform (infra only)
+# AKS Terraform (standalone)
 
 Provisions the Azure foundation for the CDC rollback pipeline in
 [`aks/`](../aks/): resource group, VNet, ACR, AKS (with Key Vault CSI), and
@@ -75,7 +75,7 @@ az account show --query id -o tsv
 ## 1. Terraform apply
 
 ```bash
-cd from_work/cdc/terraform   # or aks/terraform if that is your tree
+cd cdc/terraform   # or aks/terraform if that is your tree
 cp terraform.tfvars.example terraform.tfvars
 # Edit terraform.tfvars:
 #   subscription_id
@@ -181,11 +181,11 @@ and Terraform times out (~60m). App teardown commands live in
 [`aks/README.md`](../aks/README.md) (Full teardown); then:
 
 ```bash
-eval "$(cd from_work/cdc/terraform && terraform output -raw aks_get_credentials)"
+eval "$(cd cdc/terraform && terraform output -raw aks_get_credentials)"
 
 # From aks README: helm uninstall cdc-rollback + strimzi, delete PVCs/pods
 
-cd from_work/cdc/terraform
+cd cdc/terraform
 terraform destroy
 ```
 

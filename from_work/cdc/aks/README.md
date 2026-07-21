@@ -10,13 +10,13 @@ Read the main [README](../README.md) first — architecture, rollback window,
 type-transform validation, and rollback checklist apply unchanged. This file
 is the **deploy + operate** runbook for AKS.
 
-Infrastructure (RG, VNet, ACR, AKS, peering) is provisioned separately —
-see [`../terraform/README.md`](../terraform/README.md).
+Infrastructure (RG, VNet, ACR, AKS, peering, private DNS) is assumed to
+already exist and be managed outside this repo.
 
 ## Order of operations
 
 ```text
-A. Infra (terraform/)     apply + VNet peering / private DNS
+A. Infra (external IaC)   already applied + VNet peering / private DNS
 B. Cluster access         kubeconfig, namespace, ACR pull/push secret
 C. Config + secrets       values.local.yaml, Key Vault (check/create)
 D. Connect image          build + push to ACR
@@ -27,14 +27,14 @@ G. Operate                status / load / compare / rollback / decommission
 
 ## Differences from Docker Compose
 
-|                         | Docker Compose                                        | AKS (Helm)                                   |
-| ----------------------- | ----------------------------------------------------- | -------------------------------------------- |
-| Kafka                   | KRaft, single broker on one VM                        | Strimzi KRaft, 3 brokers RF=3                |
-| Secrets                 | `instances/<name>.env` files on the VM                | Azure Key Vault CSI                          |
-| Connectors deployed via | REST API (`scripts/`)                                 | `KafkaConnector` CRDs (`helm upgrade`)       |
-| Scale                   | N instances, one shared single-broker Kafka on one VM | N instances, one shared 3-broker HA Kafka    |
-| Rollback triggered via  | `scripts/deploy-rollback-sink.sh <name>`              | `aks/scripts/deploy-rollback-sink.sh <name>` |
-| Rollback window (7 days)| `docker-compose.yml`                                  | `chart/templates/kafka.yaml`                 |
+|                          | Docker Compose                                        | AKS (Helm)                                   |
+| ------------------------ | ----------------------------------------------------- | -------------------------------------------- |
+| Kafka                    | KRaft, single broker on one VM                        | Strimzi KRaft, 3 brokers RF=3                |
+| Secrets                  | `instances/<name>.env` files on the VM                | Azure Key Vault CSI                          |
+| Connectors deployed via  | REST API (`scripts/`)                                 | `KafkaConnector` CRDs (`helm upgrade`)       |
+| Scale                    | N instances, one shared single-broker Kafka on one VM | N instances, one shared 3-broker HA Kafka    |
+| Rollback triggered via   | `scripts/deploy-rollback-sink.sh <name>`              | `aks/scripts/deploy-rollback-sink.sh <name>` |
+| Rollback window (7 days) | `docker-compose.yml`                                  | `chart/templates/kafka.yaml`                 |
 
 ## Layout
 
@@ -45,7 +45,7 @@ aks/
   scripts/deploy-rollback-sink.sh
   scripts/compare-mysql-pg-data.sh
   scripts/build-push-connect-image.sh
-../terraform/                    Azure infra (apply first)
+external IaC/                    Azure infra (pre-existing)
 ../scripts/                      cdc-status, monitor, simulate-shop-load, …
 ```
 
@@ -76,13 +76,20 @@ upgrade` is the deployment mechanism.
 
 ## Install
 
-Assumes you completed [`../terraform/README.md`](../terraform/README.md)
-steps **1** (apply) and **7** (peering + DNS). Commands below are from
-`from_work/cdc/` unless noted. Terraform outputs:
+Assumes infra already exists (AKS/ACR/Key Vault/networking) and is managed
+outside this repo. Commands below are from `cdc/` unless noted.
+Set environment values from your existing platform inventory:
 
 ```bash
-TF=../terraform   # if you are already in aks/; else from_work/cdc/terraform
-eval "$(terraform -chdir="$TF" output -raw aks_get_credentials)"
+RG_NAME=<resource-group>
+AKS_NAME=<aks-cluster-name>
+ACR_NAME=<acr-name>
+ACR_LOGIN_SERVER=<acr-login-server>          # e.g. myacr.azurecr.io
+ACR_PUSH_TOKEN_NAME=<acr-push-token-name>    # optional (only for push secret)
+ACR_PUSH_TOKEN_PASSWORD=<acr-push-token-pass> # optional (only for push secret)
+KEY_VAULT_NAME=<key-vault-name>
+
+az aks get-credentials -g "$RG_NAME" -n "$AKS_NAME" --overwrite-existing
 ```
 
 ### 1. kubeconfig + namespace
@@ -97,16 +104,16 @@ kubectl create namespace cdc-rollback
 ```bash
 # Cluster pull
 az aks update \
-  -g "$(terraform -chdir="$TF" output -raw resource_group_name)" \
-  -n "$(terraform -chdir="$TF" output -raw aks_name)" \
-  --attach-acr "$(terraform -chdir="$TF" output -raw acr_name)"
+  -g "$RG_NAME" \
+  -n "$AKS_NAME" \
+  --attach-acr "$ACR_NAME"
 
 # Optional in-cluster push credentials (local build script uses az acr login)
 kubectl create secret docker-registry acr-push-credentials \
   -n cdc-rollback \
-  --docker-server="$(terraform -chdir="$TF" output -raw acr_login_server)" \
-  --docker-username="$(terraform -chdir="$TF" output -raw acr_push_token_name)" \
-  --docker-password="$(terraform -chdir="$TF" output -raw acr_push_token_password)" \
+  --docker-server="$ACR_LOGIN_SERVER" \
+  --docker-username="$ACR_PUSH_TOKEN_NAME" \
+  --docker-password="$ACR_PUSH_TOKEN_PASSWORD" \
   --dry-run=client -o yaml | kubectl apply -f -
 ```
 
@@ -117,15 +124,14 @@ cd aks   # or stay in cdc/ and use aks/ paths
 cp values.example.yaml values.local.yaml
 ```
 
-Fill from terraform outputs (`helm_values_snippet` is a cheat sheet — keep
-image tag `4.3-cdc1`):
+Fill from your existing environment values (keep image tag `3.9-cdc1`):
 
 ```yaml
-connectImage: <acr_login_server>/cdc-kafka-connect:4.3-cdc1
+connectImage: <acr_login_server>/cdc-kafka-connect:3.9-cdc1
 
 instances:
-  - name: toolbox                    # ^[a-z][a-z0-9]*$ — CDC nickname
-    enabled: true                    # false until KV secrets exist
+  - name: toolbox # ^[a-z][a-z0-9]*$ — CDC nickname
+    enabled: true # false until KV secrets exist
     keyVault:
       name: <key_vault_name>
       tenantId: <tenant_id>
@@ -157,7 +163,7 @@ load-test secret: `cdc-<nickname>-postgres-load-password`.
 `mysql.passwordSecret` to the vault object names:
 
 ```bash
-VAULT="$(terraform -chdir="$TF" output -raw key_vault_name)"
+VAULT="$KEY_VAULT_NAME"
 az keyvault secret list --vault-name "$VAULT" --query "[].name" -o tsv
 ```
 
@@ -225,7 +231,7 @@ Uses `connectImage` from `values.local.yaml`. Re-run after any change to
 
 ### 6. Confirm DB reachability from the cluster
 
-Peering/DNS are configured in terraform README §7. Smoke test:
+Peering/DNS are configured by your existing infra. Smoke test:
 
 ```bash
 kubectl run -n cdc-rollback -it --rm netcheck --image=busybox:1.36 --restart=Never -- \
@@ -249,12 +255,15 @@ If you used older `<DB_NAME>_cdc_*` names, set `postgres.slotName` /
 
 ### 8. Install Strimzi
 
-Strimzi **1.1.0** matches Kafka **4.3.0** (needs Kubernetes 1.25+; any
-current AKS default qualifies):
+Strimzi **0.45.0** matches Kafka **3.9.0**. On AKS Kubernetes 1.33+ set
+`STRIMZI_KUBERNETES_VERSION` or the operator crash-loops:
 
 ```bash
 helm install strimzi oci://quay.io/strimzi-helm/strimzi-kafka-operator \
-  --version 1.1.0 -n cdc-rollback
+  --version 0.45.0 -n cdc-rollback
+
+kubectl set env deployment/strimzi-cluster-operator -n cdc-rollback \
+  STRIMZI_KUBERNETES_VERSION="major=1,minor=$(kubectl version -o json | sed -n 's/.*"minor": "\([0-9]*\).*/\1/p' | head -1)"
 
 kubectl rollout status deployment/strimzi-cluster-operator -n cdc-rollback
 ```
@@ -286,7 +295,7 @@ kubectl port-forward -n cdc-rollback svc/cdc-kafbat-ui 8080:8080
 # http://localhost:8080
 ```
 
-Chart uses `snapshot.mode: no_data` — only changes **after** the connector
+Chart uses `snapshot.mode: never` — only changes **after** the connector
 starts are captured. Do not treat the rollback window as covering
 pre-connector history.
 
@@ -387,8 +396,8 @@ helm upgrade cdc-rollback aks/chart -n cdc-rollback --reuse-values \
 kubectl get kafkaconnector -n cdc-rollback   # no mysql-rollback-sink-*
 ```
 
-   Kafka topics and consumer groups remain (change log + ~7 day retention).
-   Optional tidy for the idle sink group:
+Kafka topics and consumer groups remain (change log + ~7 day retention).
+Optional tidy for the idle sink group:
 
 ```bash
 kubectl exec -n cdc-rollback cdc-kafka-broker-0 -c kafka -- \
@@ -407,10 +416,10 @@ SELECT pg_drop_replication_slot('cdc_<name>');
 
 Shared Kafka/Connect stay up. Clean up only `<name>`:
 
-| Shared (leave alone) | Per-instance |
-|---|---|
-| Strimzi / Kafka / Connect / namespace | `postgres-source-<name>`, KV mount |
-| Other instances | Topics `cdc-<name>.*`, slot on **that** Postgres |
+| Shared (leave alone)                  | Per-instance                                     |
+| ------------------------------------- | ------------------------------------------------ |
+| Strimzi / Kafka / Connect / namespace | `postgres-source-<name>`, KV mount               |
+| Other instances                       | Topics `cdc-<name>.*`, slot on **that** Postgres |
 
 1. If a sink is deployed for this instance only, remove it from `rollback`
    without clearing other active rollbacks
@@ -421,19 +430,17 @@ Shared Kafka/Connect stay up. Clean up only `<name>`:
 helm upgrade cdc-rollback aks/chart -n cdc-rollback -f aks/values.local.yaml
 ```
 
-   Use `-f` (not only `--reuse-values`) so Helm reads the edited flag.
-   Connect restarts briefly.
-3. Drop that instance’s Postgres slot (tunnel).
-4. Optional: delete `cdc-<name>.*` topics and consumer groups for that prefix.
-5. Optional: remove KV secrets / the `instances[]` block when you will not
-   re-enable it.
+Use `-f` (not only `--reuse-values`) so Helm reads the edited flag.
+Connect restarts briefly. 3. Drop that instance’s Postgres slot (tunnel). 4. Optional: delete `cdc-<name>.*` topics and consumer groups for that prefix. 5. Optional: remove KV secrets / the `instances[]` block when you will not
+re-enable it.
 
-Only when **no** instances remain → Full teardown, then terraform destroy.
+Only when **no** instances remain → Full teardown, then deprovision infra via
+your external IaC process.
 
 ## Full teardown
 
-Destroys the shared Kafka log for everyone. Then destroy Azure infra
-([terraform README](../terraform/README.md#destroy)).
+Destroys the shared Kafka log for everyone. Then destroy Azure infra using
+your external IaC process.
 
 ```bash
 helm uninstall cdc-rollback -n cdc-rollback || true
@@ -443,4 +450,4 @@ kubectl delete pod -n cdc-rollback --all --force --grace-period=0 --wait=false
 ```
 
 Drop remaining replication slots via the Postgres tunnel / jump host. Then
-`terraform destroy` in `terraform/`.
+deprovision AKS/ACR/network resources via your external IaC process.

@@ -96,12 +96,10 @@ _OPAQUE_UDTS = frozenset({"json", "jsonb", "bytea", "bit"})
 @dataclass
 class Config:
     mysql_host: str
-    mysql_port: int
     mysql_user: str
     mysql_db: str
     mysql_password: str
     pg_host: str
-    pg_port: int
     pg_user: str
     pg_db: str
     pg_password: str
@@ -177,12 +175,10 @@ Examples:
     )
     ap.add_argument("--env-file", help="Source variables from FILE")
     ap.add_argument("--mysql-host", help="MySQL host (or MYSQL_FQDN)")
-    ap.add_argument("--mysql-port", type=int, help="MySQL port (or MYSQL_PORT, default 3306)")
     ap.add_argument("--mysql-user", help="MySQL user (or MYSQL_USER)")
     ap.add_argument("--mysql-db", help="MySQL database (or MYSQL_DB)")
     ap.add_argument("--mysql-pass-file", help="Read MySQL password from FILE")
     ap.add_argument("--pg-host", help="PostgreSQL host (or PG_FQDN)")
-    ap.add_argument("--pg-port", type=int, help="PostgreSQL port (or PG_PORT, default 5432)")
     ap.add_argument("--pg-user", help="PostgreSQL user (or PG_USER)")
     ap.add_argument("--pg-db", help="PostgreSQL database (or PG_DB)")
     ap.add_argument("--pg-pass-file", help="Read PostgreSQL password from FILE")
@@ -221,25 +217,11 @@ def build_config(args: argparse.Namespace) -> Config:
     mysql_host = args.mysql_host or env.get("MYSQL_FQDN", "")
     mysql_user = args.mysql_user or env.get("MYSQL_USER", "")
     mysql_db = args.mysql_db or env.get("MYSQL_DB", "")
-    try:
-        mysql_port = int(
-            args.mysql_port
-            if args.mysql_port is not None
-            else env.get("MYSQL_PORT", "3306")
-        )
-    except ValueError as exc:
-        raise RuntimeError("MYSQL_PORT must be an integer") from exc
 
     pg_host = args.pg_host or env.get("PG_FQDN", "")
     pg_user = args.pg_user or env.get("PG_USER", "")
     pg_db = args.pg_db or env.get("PG_DB", "")
     pg_schema = args.pg_schema or env.get("PG_SCHEMA", "public")
-    try:
-        pg_port = int(
-            args.pg_port if args.pg_port is not None else env.get("PG_PORT", "5432")
-        )
-    except ValueError as exc:
-        raise RuntimeError("PG_PORT must be an integer") from exc
 
     mysql_password = ""
     pg_password = ""
@@ -293,12 +275,10 @@ def build_config(args: argparse.Namespace) -> Config:
 
     return Config(
         mysql_host=mysql_host,
-        mysql_port=mysql_port,
         mysql_user=mysql_user,
         mysql_db=mysql_db,
         mysql_password=mysql_password,
         pg_host=pg_host,
-        pg_port=pg_port,
         pg_user=pg_user,
         pg_db=pg_db,
         pg_password=pg_password,
@@ -315,8 +295,6 @@ def _mysql_cmd(cfg: Config, sql: str) -> tuple[list[str], dict[str, str]]:
         "mysql",
         "-h",
         cfg.mysql_host,
-        "-P",
-        str(cfg.mysql_port),
         "-u",
         cfg.mysql_user,
         "--ssl-mode=REQUIRED",
@@ -335,8 +313,6 @@ def _pg_cmd(cfg: Config, sql: str) -> tuple[list[str], dict[str, str]]:
         "psql",
         "-h",
         cfg.pg_host,
-        "-p",
-        str(cfg.pg_port),
         "-U",
         cfg.pg_user,
         "-d",

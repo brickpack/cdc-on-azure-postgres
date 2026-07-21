@@ -30,7 +30,7 @@ sudo apt-get install -y -qq \
 sudo usermod -aG docker "$USER" && newgrp docker
 ```
 
-> If Terraform provisioned the VM, these are already present via `bootstrap.sh.tftpl`.
+> If your VM was provisioned with a bootstrap step, these are usually already present.
 
 ### 2. Azure CLI
 
