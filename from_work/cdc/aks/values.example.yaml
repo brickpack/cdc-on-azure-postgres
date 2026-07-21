@@ -18,6 +18,13 @@
 # ACR. Build and push with: aks/scripts/build-push-connect-image.sh
 connectImage: PLACEHOLDER_ACR_LOGIN_SERVER/cdc-kafka-connect:4.3-cdc1
 
+# Per-broker PVC size/class (3 brokers). Chart defaults are 256Gi +
+# managed-csi-premium (prod-ish). For a cheap test cluster use small Standard
+# SSD disks instead -- Helm cannot shrink existing PVCs; delete and recreate
+# if you already deployed larger ones.
+kafkaStorageSize: 32Gi
+kafkaStorageClass: managed-csi
+
 # One entry per database instance. name must match ^[a-z][a-z0-9]*$ -- it
 # becomes the Kafka topic prefix (cdc-<name>) and default slot/publication
 # (cdc_<name>). It is NOT required to match existing Key Vault secret names
