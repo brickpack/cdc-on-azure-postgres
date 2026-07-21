@@ -26,13 +26,14 @@ spec:
   # before first deploy or whenever Dockerfile.connect changes.
   image: {{ required "connectImage is required -- set it in aks/values.local.yaml" .Values.connectImage }}
   bootstrapServers: cdc-kafka-kafka-bootstrap:9092
+  # Required on kafka.strimzi.io/v1 (were under spec.config as group.id /
+  # *.storage.topic on v1beta2). Same names as docker-compose.yml.
+  groupId: cdc-rollback-connect-cluster
+  configStorageTopic: cdc-connect-configs
+  offsetStorageTopic: cdc-connect-offsets
+  statusStorageTopic: cdc-connect-status
   config:
-    # Same Connect cluster identity/settings as docker-compose.yml, with
-    # internal-topic replication raised from 1 to 3.
-    group.id: cdc-rollback-connect-cluster
-    config.storage.topic: cdc-connect-configs
-    offset.storage.topic: cdc-connect-offsets
-    status.storage.topic: cdc-connect-status
+    # Internal-topic RF raised from 1 (Compose single broker) to 3.
     config.storage.replication.factor: 3
     offset.storage.replication.factor: 3
     status.storage.replication.factor: 3
