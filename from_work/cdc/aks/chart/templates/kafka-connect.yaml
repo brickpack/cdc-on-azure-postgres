@@ -9,7 +9,7 @@ null and KafkaConnect rejects it (server-side apply).
 {{- $enabled = append $enabled . }}
 {{- end }}
 {{- end }}
-apiVersion: kafka.strimzi.io/v1beta2
+apiVersion: kafka.strimzi.io/v1
 kind: KafkaConnect
 metadata:
   name: cdc-connect

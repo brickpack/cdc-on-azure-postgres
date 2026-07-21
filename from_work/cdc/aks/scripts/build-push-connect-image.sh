@@ -11,7 +11,7 @@
 #   ./aks/scripts/build-push-connect-image.sh
 #
 # Override the image tag via environment variable:
-#   CONNECT_IMAGE=myacr.azurecr.io/cdc-kafka-connect:3.9-cdc2 ./build-push-connect-image.sh
+#   CONNECT_IMAGE=myacr.azurecr.io/cdc-kafka-connect:4.3-cdc2 ./build-push-connect-image.sh
 #
 # The default tag is read from aks/values.local.yaml (connectImage field).
 # If that file doesn't exist yet, set CONNECT_IMAGE explicitly.

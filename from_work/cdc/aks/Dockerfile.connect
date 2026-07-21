@@ -4,13 +4,16 @@
 # builds from ../Dockerfile: Strimzi Connect pods use their own launcher
 # scripts and load plugins from /opt/kafka/plugins, not Confluent's
 # /etc/confluent/docker/run entrypoint and /usr/share/confluent-hub-components.
-# Same plugin versions as ../Dockerfile; only the base image and layout
-# differ. Build and push with: aks/scripts/build-push-connect-image.sh
+# Unlike ../Dockerfile (Debezium 2.4.2 on Confluent Platform 7.5 / Kafka 3.x),
+# this image runs on Strimzi's Kafka 4.3 base, which needs Debezium 3.x --
+# 2.4.2 predates the Kafka 4.0 Connect API removals. The 3.x connector
+# renames two config options; connectors.yaml carries the new names.
+# Build and push with: aks/scripts/build-push-connect-image.sh
 
 FROM alpine:3.20 AS plugins
 
-ARG DEBEZIUM_VERSION=2.4.2.Final
-ARG JDBC_CONNECTOR_VERSION=10.7.4
+ARG DEBEZIUM_VERSION=3.6.0.Final
+ARG JDBC_CONNECTOR_VERSION=10.8.4
 ARG MYSQL_CONNECTOR_VERSION=8.0.33
 
 RUN apk add --no-cache curl unzip
@@ -29,7 +32,7 @@ RUN curl -fSL -o /tmp/jdbc.zip "https://hub-downloads.confluent.io/api/plugins/c
        "https://repo1.maven.org/maven2/com/mysql/mysql-connector-j/${MYSQL_CONNECTOR_VERSION}/mysql-connector-j-${MYSQL_CONNECTOR_VERSION}.jar"
 
 # Strimzi base matching the Kafka version the chart pins (templates/kafka.yaml)
-# and the 0.45.x operator from aks/README.md "Prerequisites".
-FROM quay.io/strimzi/kafka:0.45.0-kafka-3.9.0
+# and the 1.1.0 operator from aks/README.md "Prerequisites".
+FROM quay.io/strimzi/kafka:1.1.0-kafka-4.3.0
 COPY --from=plugins /plugins/ /opt/kafka/plugins/
 USER 1001
