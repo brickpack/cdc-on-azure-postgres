@@ -430,6 +430,50 @@ helm upgrade cdc-rollback aks/chart -n cdc-rollback -f aks/values.local.yaml
 
 Only when **no** instances remain → Full teardown, then terraform destroy.
 
+## Wipe and redeploy (keep Azure infra)
+
+Removes every Helm-managed object and the Kafka disks so the stack can be
+reinstalled from scratch — used for the Strimzi 0.45.0 / Kafka 3.9 →
+1.1.0 / 4.3 move, where the old `v1beta2` CRDs and 3.9-formatted disks
+cannot carry over. The namespace, the `acr-push-credentials` secret and
+everything Terraform manages (AKS, ACR, Key Vault, networking) stay
+untouched.
+
+**This erases the Kafka log, i.e. the entire rollback window.** Changes
+already streamed to Kafka can no longer be replayed into MySQL afterwards
+— only do this when no rollback might be needed. Leave the Postgres
+replication slots alone: the redeployed sources resume from each slot's
+position, so changes made while the pipeline is down are still captured.
+The slots hold WAL on the Postgres servers while disconnected, though, so
+redeploy promptly rather than leaving the pipeline down for days.
+
+```bash
+# 1. CDC chart: Kafka + Connect + connectors + kafbat-ui + KV SecretProviderClasses.
+#    Uninstall while the operator is still running so it cleans up the pods.
+helm uninstall cdc-rollback -n cdc-rollback
+kubectl wait --for=delete pod -l strimzi.io/cluster=cdc-connect -n cdc-rollback --timeout=5m
+kubectl wait --for=delete pod -l strimzi.io/cluster=cdc-kafka -n cdc-rollback --timeout=10m
+
+# 2. Operator
+helm uninstall strimzi -n cdc-rollback
+
+# 3. Strimzi CRDs -- helm uninstall leaves them behind, and CRDs from a
+#    0.45.0 install store v1beta2; 1.1.0 must install its own v1 CRDs.
+kubectl get crd -o name | grep strimzi.io | xargs kubectl delete
+
+# 4. Kafka disks. deleteClaim=false preserved them, but a fresh cluster
+#    (new cluster ID, 4.3 metadata) cannot adopt disks from the old one.
+kubectl delete pvc -n cdc-rollback -l strimzi.io/cluster=cdc-kafka
+
+# 5. Safety net for any stragglers
+kubectl delete pod -n cdc-rollback --all --force --grace-period=0 --wait=false 2>/dev/null || true
+```
+
+Redeploy: update `connectImage` in `aks/values.local.yaml` to the new tag
+(`4.3-cdc1`), rebuild and push the Connect image (step 5), then rerun
+steps 8–9 and verify (step 10). Key Vault secrets and step 1–4/6–7 state
+are untouched by the wipe.
+
 ## Full teardown
 
 Destroys the shared Kafka log for everyone. Then destroy Azure infra
