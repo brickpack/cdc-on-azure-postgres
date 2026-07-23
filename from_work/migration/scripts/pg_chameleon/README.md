@@ -12,6 +12,7 @@ Replaces the shell-based `run-chameleon-migrate.sh` with a single Python script 
 | `compare-mysql-pg-data.py` | Actual row-data comparison: streams rows from both databases, hashes each row, and reports mysql-only, pg-only, and changed rows per table; supports `--inspect N` for column-level diffs |
 | `patch-pg-chameleon.py`    | Combined patch (Azure SSL, decode errors, index name collisions, unsigned int promotion, skip NOT NULL, skip SAVEPOINT, MySQL 8.4 binlog status)                                          |
 | `Dockerfile.chameleon`     | Builds the patched pg_chameleon Docker image (pins mysql-replication<1.0)                                                                                                                 |
+| `load-migration-secrets.sh`| Sourced: reads the MySQL/PG passwords from Azure Key Vault and exports `MYSQL_PASSWORD` / `PG_PASSWORD`. Nothing written to disk.                                                          |
 | `migration.env.example`    | Example env file with all connection/tuning variables                                                                                                                                     |
 
 ---
@@ -87,7 +88,7 @@ Get-Content pg-chameleon.tar.gz -Raw | az ssh vm -g <RG> -n <VM> --prefer-privat
 ```bash
 vm() { az ssh vm -g rg-jumpboxaccess-prd-we-001 -n vm-jumpboxaccess-prd-we-001 --prefer-private-ip -- "$@"; }
 vm "mkdir -p ~/migration/scripts/pg_chameleon"
-for f in chameleon.py compare-mysql-pg.sh diff-rows.py patch-pg-chameleon.py Dockerfile.chameleon migration.env.example README.md; do
+for f in chameleon.py compare-mysql-pg.sh diff-rows.py patch-pg-chameleon.py Dockerfile.chameleon load-migration-secrets.sh migration.env.example README.md; do
   vm "cat > ~/migration/scripts/pg_chameleon/$f" < "$f"
 done
 ```
@@ -103,7 +104,20 @@ chmod 600 migration-secrets.env
 # Edit with your connection details (MYSQL_FQDN, PG_FQDN, MYSQL_USER, etc.)
 ```
 
-Write password files (interactive, no secrets in shell history):
+Recommended: source the passwords from Azure Key Vault (nothing written to disk):
+
+```bash
+source load-migration-secrets.sh \
+  --key-vault <vault-name> \
+  --mysql-secret <mysql-password-secret> \
+  --pg-secret <pg-password-secret>
+```
+
+This exports `MYSQL_PASSWORD` / `PG_PASSWORD`, which `chameleon.py` (and every
+script here) reads before falling back to the password files. Auth uses the VM's
+`az login --identity`.
+
+Alternatively, write password files (interactive, no secrets in shell history):
 
 ```bash
 bash migration/scripts/bash/write-passwords.sh

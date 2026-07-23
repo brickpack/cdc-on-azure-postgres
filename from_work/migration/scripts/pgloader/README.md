@@ -14,9 +14,10 @@ Run in order:
 
 ### Utility
 
-| Script               | Purpose                                                                                                                                             |
-| -------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `write-passwords.sh` | Prompts for MySQL/PG passwords and writes them to `~/.mysql_migration_pw` and `~/.pg_migration_pw` (mode 0600). Keeps secrets out of shell history. |
+| Script                      | Purpose                                                                                                                                             |
+| --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `load-migration-secrets.sh` | Sourced: reads the MySQL/PG passwords from Azure Key Vault and exports `MYSQL_PASSWORD` / `PG_PASSWORD`. Nothing written to disk.                   |
+| `write-passwords.sh`        | Prompts for MySQL/PG passwords and writes them to `~/.mysql_migration_pw` and `~/.pg_migration_pw` (mode 0600). Keeps secrets out of shell history. |
 
 ## VM Setup (fresh deploy)
 
@@ -47,7 +48,7 @@ az account set -s <SUB_ID>   # target subscription
 ```bash
 VM="az ssh vm -g <RG> -n <VM> --prefer-private-ip --"
 $VM "mkdir -p ~/migration/scripts/pgloader"
-for f in 1-mysql-objects-inventory.sh 2-run-pgloader.sh 3-compare-mysql-pg.sh write-passwords.sh migration.env.example README.md; do
+for f in 1-mysql-objects-inventory.sh 2-run-pgloader.sh 3-compare-mysql-pg.sh load-migration-secrets.sh write-passwords.sh migration.env.example README.md; do
   $VM "cat > ~/migration/scripts/pgloader/$f" < "$f"
 done
 ```
@@ -80,7 +81,19 @@ Resolved in order (first found wins):
 2. `MYSQL_PASSWORD` / `PG_PASSWORD` environment variables
 3. Well-known files: `~/.mysql_migration_pw`, `~/.pg_migration_pw`, `/etc/secrets/mysql_pw`, `/etc/secrets/pg_pw`
 
-Use `write-passwords.sh` to create the well-known files safely.
+Recommended: source the passwords from Azure Key Vault (nothing written to disk):
+
+```bash
+source load-migration-secrets.sh \
+  --key-vault <vault-name> \
+  --mysql-secret <mysql-password-secret> \
+  --pg-secret <pg-password-secret>
+```
+
+This exports `MYSQL_PASSWORD` / `PG_PASSWORD` (source #2 above), so every script
+in this directory picks them up with no further arguments. Auth uses the VM's
+`az login --identity`. Alternatively, `write-passwords.sh` creates the
+well-known files interactively.
 
 ## Quick Start
 
