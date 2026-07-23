@@ -17,6 +17,7 @@ Run in order:
 | Script               | Purpose                                                                                                                                             |
 | -------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `write-passwords.sh` | Prompts for MySQL/PG passwords and writes them to `~/.mysql_migration_pw` and `~/.pg_migration_pw` (mode 0600). Keeps secrets out of shell history. |
+| `scan-zero-dates.sh` | MySQL-only zero-date scan (`0000-00-00`) across one database or a list of databases (`--mysql-db-list FILE`). No PostgreSQL comparison. Writes console output plus a CSV report. |
 
 ## VM Setup (fresh deploy)
 
@@ -47,7 +48,7 @@ az account set -s <SUB_ID>   # target subscription
 ```bash
 VM="az ssh vm -g <RG> -n <VM> --prefer-private-ip --"
 $VM "mkdir -p ~/migration/scripts/pgloader"
-for f in 1-mysql-objects-inventory.sh 2-run-pgloader.sh 3-compare-mysql-pg.sh write-passwords.sh migration.env.example README.md; do
+for f in 1-mysql-objects-inventory.sh 2-run-pgloader.sh 3-compare-mysql-pg.sh scan-zero-dates.sh write-passwords.sh migration.env.example README.md; do
   $VM "cat > ~/migration/scripts/pgloader/$f" < "$f"
 done
 ```
@@ -218,6 +219,25 @@ bash 3-compare-mysql-pg.sh --env-file ./migration.env --fast --zero-dates
 | `MISMATCH` | PG NULLs < MySQL NULLs — legitimate NULLs are also missing          |
 | `ERR`      | Query failed (table missing in PG or column type mismatch)          |
 
+#### Scanning multiple MySQL databases for zero-dates (no PostgreSQL involved)
+
+`scan-zero-dates.sh` is a standalone, MySQL-only script for surveying zero-date values across many source databases before migration — it does not touch PostgreSQL. Point it at a single database or a text file listing many:
+
+```bash
+# Single database
+bash scan-zero-dates.sh --env-file ./migration.env --mysql-db the_db
+
+# List of databases, one name per line (# comments and blank lines ignored)
+cat > dbs.txt <<EOF
+shop_prod
+shop_archive
+# shop_staging   -- skipped
+EOF
+bash scan-zero-dates.sh --env-file ./migration.env --mysql-db-list dbs.txt
+```
+
+Prints the same per-table/column detail (`MY_ZEROS`, `MY_NULLS`) for every database in the list, and writes a combined CSV (`database,table,column,data_type,zero_count,mysql_nulls`) to `LOG_DIR` alongside the text report — open the CSV directly in Excel/Sheets.
+
 ## Logs
 
 All scripts write logs to `~/migration/logs/` (override with `LOG_DIR` env var).
@@ -226,3 +246,4 @@ All scripts write logs to `~/migration/logs/` (override with `LOG_DIR` env var).
 - `pgloader-detail-<timestamp>.log` — pgloader verbose log (per-table timings, errors)
 - `errors-<timestamp>/` — per-run directory for rows dropped by pgloader (`.dat` + `.log` files)
 - `compare-mysql-pg_<timestamp>.txt` — comparison report
+- `scan-zero-dates_<timestamp>.txt` / `.csv` — zero-date scan report and CSV
